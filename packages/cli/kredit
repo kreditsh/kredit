@@ -252,6 +252,15 @@ server.serve_forever()
   echo "You're ready to go. Try: kredit orgs create --name=my-team"
 }
 
+cmd_logout() {
+  if [ -f "$HOME/.kredit/config" ]; then
+    rm "$HOME/.kredit/config"
+    echo "Logged out. API key removed from ~/.kredit/config"
+  else
+    echo "Not logged in."
+  fi
+}
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 cmd_check() {
@@ -416,6 +425,7 @@ Usage:
 
 Commands:
   login     Authenticate and create an API key
+  logout    Remove saved API key
   check     Run a risk check before executing an action
   report    Report the outcome of an action
   agents    Manage agents (list, create)
@@ -451,6 +461,7 @@ main() {
 
   case "$cmd" in
     login)    cmd_login "$@" ;;
+    logout)   cmd_logout "$@" ;;
     check)    cmd_check "$@" ;;
     report)   cmd_report "$@" ;;
     agents)   cmd_agents "$@" ;;
