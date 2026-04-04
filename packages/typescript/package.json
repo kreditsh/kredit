@@ -1,5 +1,5 @@
 {
-  "name": "kredit",
+  "name": "@kredit/kredit",
   "version": "0.1.0",
   "description": "Financial risk management SDK for AI agents",
   "type": "module",
@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.4.0",
+    "@types/node": "^25.5.2",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0"
   },
