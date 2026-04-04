@@ -52,7 +52,7 @@ class _AgentsMixin:
         if org_id is not None:
             body["org_id"] = org_id
         elif org is not None:
-            body["org"] = org
+            body["org_name"] = org
         else:
             raise KreditError("Either org_id or org must be provided")
         data = self._client._request("POST", "/agents", json=body)

@@ -103,7 +103,7 @@ class Agents {
     if (params.orgId) {
       body.org_id = params.orgId;
     } else if (params.org) {
-      body.org = params.org;
+      body.org_name = params.org;
     } else {
       throw new KreditError("Either orgId or org must be provided");
     }

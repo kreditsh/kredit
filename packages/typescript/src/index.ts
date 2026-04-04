@@ -3,8 +3,9 @@ export type { KreditOptions } from "./client.js";
 export { KreditError, AuthError, RiskDenied } from "./errors.js";
 export type {
   Agent,
-  AgentStatus,
+  ApiLimit,
   CheckResult,
+  Credit,
   Org,
   ScoreResult,
   Transaction,
@@ -12,8 +13,9 @@ export type {
 } from "./models.js";
 export {
   AgentSchema,
-  AgentStatusSchema,
+  ApiLimitSchema,
   CheckResultSchema,
+  CreditSchema,
   OrgSchema,
   ScoreResultSchema,
   TransactionSchema,
