@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+#
+# kredit — CLI for the Kredit financial risk management API
+#
+# Usage:
+#   kredit check   --agent=AGT_ID --action=ACTION --cost=COST
+#   kredit report  --agent=AGT_ID --txn=TXN_ID --outcome=OUTCOME --cost=COST
+#   kredit agents  list --org=ORG_ID
+#   kredit agents  create --org=ORG_NAME --name=AGENT_NAME
+#   kredit orgs    create --name=ORG_NAME
+#   kredit orgs    list
+#   kredit score   --agent=AGT_ID
+#   kredit wallet  --agent=AGT_ID
+#
+# Environment:
+#   KREDIT_API_KEY  — API key (or set in ~/.kredit/config as api_key=...)
+#   KREDIT_API_URL  — Base URL (default: https://api.kredit.sh)
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ── Config resolution ────────────────────────────────────────────────────────
+
+resolve_api_key() {
+  if [ -n "${KREDIT_API_KEY:-}" ]; then
+    echo "$KREDIT_API_KEY"
+    return
+  fi
+
+  local config_file="$HOME/.kredit/config"
+  if [ -f "$config_file" ]; then
+    local key
+    key=$(grep -E '^(api_key|KREDIT_API_KEY)=' "$config_file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' ')
+    if [ -n "$key" ]; then
+      echo "$key"
+      return
+    fi
+  fi
+
+  echo ""
+}
+
+API_KEY=$(resolve_api_key)
+BASE_URL="${KREDIT_API_URL:-https://api.kredit.sh}"
+BASE_URL="${BASE_URL%/}"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+die() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+require_api_key() {
+  if [ -z "$API_KEY" ]; then
+    die "No API key. Set KREDIT_API_KEY or add api_key=... to ~/.kredit/config"
+  fi
+}
+
+# Format JSON output — use jq if available, otherwise cat as-is
+format_json() {
+  if command -v jq &>/dev/null; then
+    jq .
+  else
+    cat
+  fi
+}
+
+# HTTP request with 5s timeout and 2 retries with backoff
+api_request() {
+  local method="$1"
+  local path="$2"
+  shift 2
+  local data="${1:-}"
+
+  require_api_key
+
+  local url="${BASE_URL}${path}"
+  local attempt=0
+  local max_retries=2
+  local response
+  local http_code
+
+  while [ $attempt -le $max_retries ]; do
+    local curl_args=(
+      --silent
+      --show-error
+      --max-time 5
+      --write-out "\n%{http_code}"
+      -H "Authorization: Bearer ${API_KEY}"
+      -H "Content-Type: application/json"
+      -H "User-Agent: kredit-cli/${VERSION}"
+    )
+
+    if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
+      curl_args+=(-X "$method")
+      if [ -n "$data" ]; then
+        curl_args+=(-d "$data")
+      fi
+    elif [ "$method" = "GET" ]; then
+      curl_args+=(-X GET)
+    fi
+
+    curl_args+=("$url")
+
+    local raw
+    raw=$(curl "${curl_args[@]}" 2>&1) || true
+
+    # Last line is the HTTP status code
+    http_code=$(echo "$raw" | tail -1)
+    response=$(echo "$raw" | sed '$d')
+
+    # Success
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+      echo "$response" | format_json
+      return 0
+    fi
+
+    # Client errors — don't retry
+    if [[ "$http_code" =~ ^4[0-9][0-9]$ ]]; then
+      echo "error: HTTP $http_code" >&2
+      echo "$response" | format_json >&2
+      return 1
+    fi
+
+    # Server errors or connection failures — retry with backoff
+    attempt=$((attempt + 1))
+    if [ $attempt -le $max_retries ]; then
+      local delay
+      delay=$(echo "0.5 * (2 ^ ($attempt - 1))" | bc -l 2>/dev/null || echo "1")
+      sleep "$delay"
+    fi
+  done
+
+  echo "error: Request failed after $((max_retries + 1)) attempts (last HTTP $http_code)" >&2
+  echo "$response" | format_json >&2
+  return 1
+}
+
+DASHBOARD_URL="${KREDIT_DASHBOARD_URL:-https://kredit.sh}"
+
+# ── Login ───────────────────────────────────────────────────────────────────
+
+cmd_login() {
+  echo "Logging in to Kredit..."
+
+  # Find a free port
+  local port
+  port=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()" 2>/dev/null) || die "Python 3 required for login"
+
+  local token=""
+  local login_url="${DASHBOARD_URL}/auth/cli-callback?port=${port}"
+
+  # Start a tiny HTTP server that waits for the callback
+  python3 -c "
+import http.server, urllib.parse, sys, threading
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        token = params.get('token', [''])[0]
+        if token:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'<html><body style=\"font-family:sans-serif;text-align:center;margin-top:80px\"><h2>Logged in to Kredit</h2><p>You can close this window and return to your terminal.</p></body></html>')
+            with open('/tmp/.kredit_cli_token', 'w') as f:
+                f.write(token)
+            threading.Thread(target=self.server.shutdown).start()
+        else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'Missing token')
+    def log_message(self, *args): pass
+
+server = http.server.HTTPServer(('127.0.0.1', ${port}), Handler)
+server.serve_forever()
+" &
+  local server_pid=$!
+
+  # Open browser
+  echo "Opening browser for authentication..."
+  if command -v open &>/dev/null; then
+    open "$login_url"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$login_url"
+  else
+    echo "Open this URL in your browser:"
+    echo "  $login_url"
+  fi
+
+  echo "Waiting for authentication..."
+
+  # Wait for the server to finish (max 120 seconds)
+  local waited=0
+  while kill -0 $server_pid 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ $waited -ge 120 ]; then
+      kill $server_pid 2>/dev/null
+      rm -f /tmp/.kredit_cli_token
+      die "Login timed out after 120 seconds"
+    fi
+  done
+
+  # Read the token
+  if [ ! -f /tmp/.kredit_cli_token ]; then
+    die "Login failed — no token received"
+  fi
+
+  token=$(cat /tmp/.kredit_cli_token)
+  rm -f /tmp/.kredit_cli_token
+
+  if [ -z "$token" ]; then
+    die "Login failed — empty token"
+  fi
+
+  echo "Authenticated. Creating API key..."
+
+  # Create an API key using the JWT
+  local response
+  response=$(curl --silent --show-error --max-time 10 \
+    -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    "${BASE_URL}/auth/keys" 2>&1) || die "Failed to create API key"
+
+  local api_key
+  if command -v jq &>/dev/null; then
+    api_key=$(echo "$response" | jq -r '.key // empty')
+  else
+    api_key=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null)
+  fi
+
+  if [ -z "$api_key" ]; then
+    echo "error: Failed to create API key" >&2
+    echo "$response" | format_json >&2
+    exit 1
+  fi
+
+  # Save to ~/.kredit/config
+  mkdir -p "$HOME/.kredit"
+  echo "api_key=${api_key}" > "$HOME/.kredit/config"
+  chmod 600 "$HOME/.kredit/config"
+
+  echo ""
+  echo "API key created and saved to ~/.kredit/config"
+  echo "Key: ${api_key}"
+  echo ""
+  echo "You're ready to go. Try: kredit orgs create --name=my-team"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_check() {
+  local agent="" action="" cost=""
+
+  for arg in "$@"; do
+    case "$arg" in
+      --agent=*) agent="${arg#--agent=}" ;;
+      --action=*) action="${arg#--action=}" ;;
+      --cost=*) cost="${arg#--cost=}" ;;
+      --help) echo "Usage: kredit check --agent=AGT_ID --action=ACTION --cost=COST"; return 0 ;;
+      *) die "Unknown argument: $arg" ;;
+    esac
+  done
+
+  [ -z "$agent" ] && die "Missing --agent"
+  [ -z "$action" ] && die "Missing --action"
+  [ -z "$cost" ] && die "Missing --cost"
+
+  api_request POST "/check" "{\"agent_id\":\"${agent}\",\"action\":\"${action}\",\"estimated_cost\":${cost}}"
+}
+
+cmd_report() {
+  local agent="" txn="" outcome="" cost=""
+
+  for arg in "$@"; do
+    case "$arg" in
+      --agent=*) agent="${arg#--agent=}" ;;
+      --txn=*) txn="${arg#--txn=}" ;;
+      --outcome=*) outcome="${arg#--outcome=}" ;;
+      --cost=*) cost="${arg#--cost=}" ;;
+      --help) echo "Usage: kredit report --agent=AGT_ID --txn=TXN_ID --outcome=OUTCOME --cost=COST"; return 0 ;;
+      *) die "Unknown argument: $arg" ;;
+    esac
+  done
+
+  [ -z "$agent" ] && die "Missing --agent"
+  [ -z "$txn" ] && die "Missing --txn"
+  [ -z "$outcome" ] && die "Missing --outcome"
+  [ -z "$cost" ] && die "Missing --cost"
+
+  api_request POST "/report" "{\"agent_id\":\"${agent}\",\"txn_id\":\"${txn}\",\"outcome\":\"${outcome}\",\"actual_cost\":${cost}}"
+}
+
+cmd_agents() {
+  local subcmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    list)
+      local org=""
+      for arg in "$@"; do
+        case "$arg" in
+          --org=*) org="${arg#--org=}" ;;
+          --help) echo "Usage: kredit agents list --org=ORG_ID"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$org" ] && die "Missing --org"
+      api_request GET "/agents?org_id=${org}"
+      ;;
+    create)
+      local org="" name=""
+      for arg in "$@"; do
+        case "$arg" in
+          --org=*) org="${arg#--org=}" ;;
+          --name=*) name="${arg#--name=}" ;;
+          --help) echo "Usage: kredit agents create --org=ORG_NAME --name=AGENT_NAME"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$org" ] && die "Missing --org"
+      [ -z "$name" ] && die "Missing --name"
+      api_request POST "/agents" "{\"org\":\"${org}\",\"name\":\"${name}\"}"
+      ;;
+    --help|help)
+      echo "Usage: kredit agents <list|create>"
+      echo ""
+      echo "  kredit agents list --org=ORG_ID"
+      echo "  kredit agents create --org=ORG_NAME --name=AGENT_NAME"
+      ;;
+    "")
+      die "Missing subcommand. Use: kredit agents <list|create>"
+      ;;
+    *)
+      die "Unknown agents subcommand: $subcmd"
+      ;;
+  esac
+}
+
+cmd_orgs() {
+  local subcmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    list)
+      api_request GET "/orgs"
+      ;;
+    create)
+      local name=""
+      for arg in "$@"; do
+        case "$arg" in
+          --name=*) name="${arg#--name=}" ;;
+          --help) echo "Usage: kredit orgs create --name=ORG_NAME"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$name" ] && die "Missing --name"
+      api_request POST "/orgs" "{\"name\":\"${name}\"}"
+      ;;
+    --help|help)
+      echo "Usage: kredit orgs <list|create>"
+      echo ""
+      echo "  kredit orgs list"
+      echo "  kredit orgs create --name=ORG_NAME"
+      ;;
+    "")
+      die "Missing subcommand. Use: kredit orgs <list|create>"
+      ;;
+    *)
+      die "Unknown orgs subcommand: $subcmd"
+      ;;
+  esac
+}
+
+cmd_score() {
+  local agent=""
+
+  for arg in "$@"; do
+    case "$arg" in
+      --agent=*) agent="${arg#--agent=}" ;;
+      --help) echo "Usage: kredit score --agent=AGT_ID"; return 0 ;;
+      *) die "Unknown argument: $arg" ;;
+    esac
+  done
+
+  [ -z "$agent" ] && die "Missing --agent"
+  api_request GET "/agents/${agent}/score"
+}
+
+cmd_wallet() {
+  local agent=""
+
+  for arg in "$@"; do
+    case "$arg" in
+      --agent=*) agent="${arg#--agent=}" ;;
+      --help) echo "Usage: kredit wallet --agent=AGT_ID"; return 0 ;;
+      *) die "Unknown argument: $arg" ;;
+    esac
+  done
+
+  [ -z "$agent" ] && die "Missing --agent"
+  api_request GET "/wallets/${agent}"
+}
+
+show_help() {
+  cat <<'HELP'
+kredit — CLI for the Kredit financial risk management API
+
+Usage:
+  kredit <command> [options]
+
+Commands:
+  login     Authenticate and create an API key
+  check     Run a risk check before executing an action
+  report    Report the outcome of an action
+  agents    Manage agents (list, create)
+  orgs      Manage organizations (list, create)
+  score     Get credit score for an agent
+  wallet    Get wallet info for an agent
+
+Options:
+  --help      Show help for a command
+  --version   Print version
+
+Examples:
+  kredit check --agent=agt_8f3k2m --action=serp_api.search --cost=1
+  kredit report --agent=agt_8f3k2m --txn=txn_abc --outcome=success --cost=1
+  kredit agents list --org=org_123
+  kredit agents create --org=research-team --name=bot-01
+  kredit orgs create --name=research-team
+  kredit orgs list
+  kredit score --agent=agt_8f3k2m
+  kredit wallet --agent=agt_8f3k2m
+
+Environment:
+  KREDIT_API_KEY   API key (or set in ~/.kredit/config as api_key=...)
+  KREDIT_API_URL   Base URL (default: https://api.kredit.sh)
+HELP
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$cmd" in
+    login)    cmd_login "$@" ;;
+    check)    cmd_check "$@" ;;
+    report)   cmd_report "$@" ;;
+    agents)   cmd_agents "$@" ;;
+    orgs)     cmd_orgs "$@" ;;
+    score)    cmd_score "$@" ;;
+    wallet)   cmd_wallet "$@" ;;
+    --help|-h|help) show_help ;;
+    --version|-v) echo "kredit $VERSION" ;;
+    "")
+      show_help
+      exit 1
+      ;;
+    *)
+      die "Unknown command: $cmd. Run 'kredit --help' for usage."
+      ;;
+  esac
+}
+
+main "$@"
