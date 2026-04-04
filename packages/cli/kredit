@@ -367,7 +367,7 @@ cmd_report() {
   [ -z "$outcome" ] && die "Missing --outcome"
   [ -z "$cost" ] && die "Missing --cost"
 
-  api_request POST "/report" "{\"agent_id\":\"${agent}\",\"txn_id\":\"${txn}\",\"outcome\":\"${outcome}\",\"actual_cost\":${cost}}"
+  api_request POST "/report" "{\"transaction_id\":\"${txn}\",\"outcome\":\"${outcome}\",\"actual_cost\":${cost}}"
 }
 
 cmd_agents() {
