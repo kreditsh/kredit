@@ -261,6 +261,71 @@ cmd_logout() {
   fi
 }
 
+cmd_rules() {
+  local subcmd="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    list)
+      local agent=""
+      for arg in "$@"; do
+        case "$arg" in
+          --agent=*) agent="${arg#--agent=}" ;;
+          --help) echo "Usage: kredit rules list --agent=AGENT_ID"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$agent" ] && die "Missing --agent"
+      api_request GET "/agents/${agent}/rules"
+      ;;
+    add)
+      local agent="" name="" match="*" max_cost=0 daily=0 hourly=0
+      for arg in "$@"; do
+        case "$arg" in
+          --agent=*) agent="${arg#--agent=}" ;;
+          --name=*) name="${arg#--name=}" ;;
+          --match=*) match="${arg#--match=}" ;;
+          --max-cost=*) max_cost="${arg#--max-cost=}" ;;
+          --daily=*) daily="${arg#--daily=}" ;;
+          --hourly=*) hourly="${arg#--hourly=}" ;;
+          --help) echo "Usage: kredit rules add --agent=ID --name=NAME --match=PATTERN --max-cost=N --daily=N --hourly=N"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$agent" ] && die "Missing --agent"
+      [ -z "$name" ] && die "Missing --name"
+      api_request POST "/agents/${agent}/rules" "{\"name\":\"${name}\",\"match\":\"${match}\",\"max_cost_per_txn\":${max_cost},\"daily_spend_limit\":${daily},\"hourly_rate_limit\":${hourly}}"
+      ;;
+    remove)
+      local agent="" rule=""
+      for arg in "$@"; do
+        case "$arg" in
+          --agent=*) agent="${arg#--agent=}" ;;
+          --rule=*) rule="${arg#--rule=}" ;;
+          --help) echo "Usage: kredit rules remove --agent=AGENT_ID --rule=RULE_ID"; return 0 ;;
+          *) die "Unknown argument: $arg" ;;
+        esac
+      done
+      [ -z "$agent" ] && die "Missing --agent"
+      [ -z "$rule" ] && die "Missing --rule"
+      api_request DELETE "/agents/${agent}/rules/${rule}"
+      ;;
+    --help|help)
+      echo "Usage: kredit rules <list|add|remove>"
+      echo ""
+      echo "  kredit rules list --agent=AGENT_ID"
+      echo "  kredit rules add --agent=ID --name=NAME --match=PATTERN --max-cost=N --daily=N --hourly=N"
+      echo "  kredit rules remove --agent=AGENT_ID --rule=RULE_ID"
+      ;;
+    "")
+      die "Missing subcommand. Use: kredit rules <list|add|remove>"
+      ;;
+    *)
+      die "Unknown rules subcommand: $subcmd"
+      ;;
+  esac
+}
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 cmd_check() {
@@ -426,6 +491,7 @@ Usage:
 Commands:
   login     Authenticate and create an API key
   logout    Remove saved API key
+  rules     Manage agent rules (list, add, remove)
   check     Run a risk check before executing an action
   report    Report the outcome of an action
   agents    Manage agents (list, create)
@@ -465,6 +531,7 @@ main() {
     check)    cmd_check "$@" ;;
     report)   cmd_report "$@" ;;
     agents)   cmd_agents "$@" ;;
+    rules)    cmd_rules "$@" ;;
     orgs)     cmd_orgs "$@" ;;
     score)    cmd_score "$@" ;;
     wallet)   cmd_wallet "$@" ;;
