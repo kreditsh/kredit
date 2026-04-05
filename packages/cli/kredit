@@ -252,6 +252,112 @@ server.serve_forever()
   echo "You're ready to go. Try: kredit orgs create --name=my-team"
 }
 
+cmd_demo() {
+  require_api_key
+
+  echo ""
+  echo "  ╔═══════════════════════════════════╗"
+  echo "  ║       Kredit Demo Simulation      ║"
+  echo "  ╚═══════════════════════════════════╝"
+  echo ""
+
+  # Create demo org
+  echo "Creating demo org..."
+  local org_result
+  org_result=$(curl -s -X POST "${BASE_URL}/orgs" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d '{"name":"kredit-demo"}' 2>/dev/null)
+  local org_id
+  org_id=$(echo "$org_result" | jq -r '.id // empty' 2>/dev/null)
+  if [ -z "$org_id" ]; then
+    # Org might already exist
+    org_id=$(curl -s -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/orgs" | jq -r '.[] | select(.name=="kredit-demo") | .id' 2>/dev/null)
+  fi
+  [ -z "$org_id" ] && die "Failed to create demo org"
+  echo "  Org: kredit-demo ($org_id)"
+
+  # Create agents
+  echo "Creating agents..."
+  local agents=() names=()
+
+  _create_demo_agent() {
+    local name="$1" priority="$2" balance="$3" budget="$4" max_txn="$5" daily="$6" rules="$7"
+    local wallet="{\"balance\":$balance,\"budget\":$budget,\"max_per_txn\":$max_txn,\"daily_spend_limit\":$daily}"
+    local body="{\"org_name\":\"kredit-demo\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
+    local id
+    id=$(curl -s -X POST "${BASE_URL}/agents" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "$body" | jq -r '.id // empty' 2>/dev/null)
+    if [ -n "$id" ]; then
+      agents+=("$id")
+      names+=("$name")
+    fi
+  }
+
+  local R_API='[{"name":"API cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":100,"hourly_rate_limit":50},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":200,"hourly_rate_limit":100}]'
+  local R_SPEND='[{"name":"Purchase cap","match":"*","max_cost_per_txn":500,"daily_spend_limit":2000,"hourly_rate_limit":20}]'
+
+  _create_demo_agent "research-bot" "critical" 500 500 0 0 "$R_API"
+  _create_demo_agent "code-assistant" "high" 200 200 0 0 "$R_API"
+  _create_demo_agent "data-scraper" "normal" 100 100 5 100 "$R_API"
+  _create_demo_agent "travel-agent" "high" 5000 5000 1000 5000 "$R_SPEND"
+  _create_demo_agent "procurement-bot" "normal" 2000 2000 500 2000 "$R_SPEND"
+
+  local total=${#agents[@]}
+  echo "  Created $total agents"
+  echo ""
+  echo "  Open your dashboard to watch in real time:"
+  echo "  https://kredit.sh/dashboard"
+  echo ""
+  echo "  Running 1-hour simulation (Ctrl+C to stop)..."
+  echo ""
+  printf "  %-6s %-18s %-24s %9s  %-8s  %s\n" "TIME" "AGENT" "ACTION" "COST" "RESULT" "DETAIL"
+  echo "  ─────────────────────────────────────────────────────────────────────────────────────"
+
+  local API_ACTIONS=("openai.chat" "openai.embeddings" "anthropic.messages" "serp_api.search" "github.api.repos" "slack.post_message" "datadog.metrics" "postgres.query")
+  local SPEND_ACTIONS=("flight.booking" "hotel.booking" "equipment.purchase" "office_supplies.order" "software.license" "catering.order")
+  local OUTCOMES=("success" "success" "success" "success" "failure" "partial")
+
+  local START=$(date +%s) END=$(($(date +%s) + 3600)) TX=0
+
+  while [ $(date +%s) -lt $END ]; do
+    local IDX=$((RANDOM % total))
+    local AID="${agents[$IDX]}" ANAME="${names[$IDX]}"
+
+    local ACTION COST
+    if [[ "$ANAME" == travel-* ]] || [[ "$ANAME" == procurement-* ]]; then
+      ACTION="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}"
+      COST=$(awk "BEGIN{printf \"%.2f\", (($RANDOM % 49500) + 500) / 100.0}")
+    else
+      ACTION="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}"
+      COST=$(awk "BEGIN{printf \"%.2f\", (($RANDOM % 500) + 1) / 100.0}")
+    fi
+
+    local RESULT
+    RESULT=$(curl -s -X POST "${BASE_URL}/check" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"agent_id\":\"$AID\",\"action\":\"$ACTION\",\"estimated_cost\":$COST}" 2>/dev/null)
+    local TXN_ID STATUS RISK REASON
+    TXN_ID=$(echo "$RESULT" | jq -r '.transaction_id // empty' 2>/dev/null)
+    STATUS=$(echo "$RESULT" | jq -r '.status' 2>/dev/null)
+    REASON=$(echo "$RESULT" | jq -r '.block_reason // ""' 2>/dev/null)
+
+    TX=$((TX + 1))
+    local ELAPSED=$(( $(date +%s) - START ))
+    local TS=$(printf "%02d:%02d" "$((ELAPSED / 60))" "$((ELAPSED % 60))")
+
+    if [ "$STATUS" = "allowed" ] && [ -n "$TXN_ID" ]; then
+      local OC="${OUTCOMES[$((RANDOM % ${#OUTCOMES[@]}))]}"
+      local AC=$COST
+      [ "$OC" = "failure" ] && AC=$(awk "BEGIN{printf \"%.2f\", $COST * 0.3}")
+      curl -s -X POST "${BASE_URL}/report" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"transaction_id\":\"$TXN_ID\",\"outcome\":\"$OC\",\"actual_cost\":$AC}" > /dev/null 2>&1
+      printf "  %-6s %-18s %-24s \$%8s  %-8s\n" "$TS" "$ANAME" "$ACTION" "$COST" "$OC"
+    else
+      printf "  %-6s %-18s %-24s \$%8s  %-8s  %s\n" "$TS" "$ANAME" "$ACTION" "$COST" "BLOCKED" "$REASON"
+    fi
+
+    sleep $(( (RANDOM % 8) + 3 ))
+  done
+
+  echo ""
+  echo "  Demo complete: $TX transactions"
+  echo "  View results: https://kredit.sh/dashboard"
+}
+
 cmd_logout() {
   if [ -f "$HOME/.kredit/config" ]; then
     rm "$HOME/.kredit/config"
@@ -491,6 +597,7 @@ Usage:
 Commands:
   login     Authenticate and create an API key
   logout    Remove saved API key
+  demo      Run a 1-hour simulation with sample agents
   rules     Manage agent rules (list, add, remove)
   check     Run a risk check before executing an action
   report    Report the outcome of an action
@@ -528,6 +635,7 @@ main() {
   case "$cmd" in
     login)    cmd_login "$@" ;;
     logout)   cmd_logout "$@" ;;
+    demo)     cmd_demo "$@" ;;
     check)    cmd_check "$@" ;;
     report)   cmd_report "$@" ;;
     agents)   cmd_agents "$@" ;;
