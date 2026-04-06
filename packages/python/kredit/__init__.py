@@ -2,17 +2,36 @@
 
 from kredit.client import Kredit
 from kredit.exceptions import AuthError, KreditError, RiskDenied
-from kredit.models import Agent, CheckResult, Org, ScoreResult, Transaction, Wallet
+from kredit.models import (
+    Agent,
+    AgentSpend,
+    CheckResult,
+    Event,
+    FleetOverview,
+    Org,
+    Policy,
+    ReportResult,
+    Rule,
+    ScoreResult,
+    Transaction,
+    Wallet,
+)
 
 __all__ = [
     "Kredit",
     "KreditError",
     "AuthError",
     "RiskDenied",
-    "CheckResult",
     "Agent",
-    "Wallet",
+    "AgentSpend",
+    "CheckResult",
+    "Event",
+    "FleetOverview",
     "Org",
-    "Transaction",
+    "Policy",
+    "ReportResult",
+    "Rule",
     "ScoreResult",
+    "Transaction",
+    "Wallet",
 ]

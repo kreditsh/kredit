@@ -39,21 +39,21 @@ kredit login
 ```bash
 # Create an org and agent
 kredit orgs create --name=my-team
-kredit agents create --org=my-team --name=research-bot
+kredit agents create --org-name=my-team --name=research-bot
 
 # Add spending rules
-kredit rules add --agent=AGENT_ID --name="OpenAI cap" --match="openai.*" --max-cost=5 --daily=100 --hourly=50
-kredit rules add --agent=AGENT_ID --name="Default" --match="*" --max-cost=10 --daily=500 --hourly=200
+kredit rules add --agent-id=AGENT_ID --name="OpenAI cap" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100 --hourly-rate-limit=50
+kredit rules add --agent-id=AGENT_ID --name="Default" --match="*" --max-cost-per-txn=10 --daily-spend-limit=500 --hourly-rate-limit=200
 
 # Risk check before an API call
-kredit check --agent=AGENT_ID --action=openai.chat --cost=2.50
+kredit check --agent-id=AGENT_ID --action=openai.chat --estimated-cost=2.50
 # → { "status": "allowed", "risk_level": "low", "transaction_id": "..." }
 
 # Report outcome
-kredit report --agent=AGENT_ID --txn=TXN_ID --outcome=success --cost=2.50
+kredit report --transaction-id=TXN_ID --outcome=success --actual-cost=2.50
 
 # Check credit score
-kredit score --agent=AGENT_ID
+kredit score --agent-id=AGENT_ID
 ```
 
 ### Python
@@ -65,7 +65,7 @@ kredit = Kredit(api_key="kr_live_...")
 
 # Create agent with wallet and rules
 agent = kredit.agents.create(
-    org="my-team",
+    org_name="my-team",
     name="travel-bot",
     priority="high",
     wallet={"balance": 5000, "budget": 5000, "max_per_txn": 1000, "daily_spend_limit": 5000},
@@ -94,7 +94,7 @@ import { Kredit } from "@kredit/kredit";
 const kredit = new Kredit({ apiKey: "kr_live_..." });
 
 const agent = await kredit.agents.create({
-  org: "my-team",
+  orgName: "my-team",
   name: "travel-bot",
   priority: "high",
   wallet: { balance: 5000, budget: 5000, max_per_txn: 1000, daily_spend_limit: 5000 },
@@ -130,9 +130,9 @@ Rules define per-action spending limits. Each rule has a `match` pattern (fnmatc
 When an action is checked, the most specific matching rule applies. `flight.*` beats `*` for `flight.booking`.
 
 ```bash
-kredit rules add --agent=ID --name="Flight cap" --match="flight.*" --max-cost=800 --daily=3000 --hourly=10
-kredit rules list --agent=ID
-kredit rules remove --agent=ID --rule=RULE_ID
+kredit rules add --agent-id=ID --name="Flight cap" --match="flight.*" --max-cost-per-txn=800 --daily-spend-limit=3000 --hourly-rate-limit=10
+kredit rules list --agent-id=ID
+kredit rules remove --agent-id=ID --rule-id=RULE_ID
 ```
 
 ## Wallet

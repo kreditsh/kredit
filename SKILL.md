@@ -68,7 +68,7 @@ kredit = Kredit(api_key="kr_live_...")
 # Create org + agent
 org = kredit.orgs.create(name="my-team")
 agent = kredit.agents.create(
-    org="my-team",
+    org_name="my-team",
     name="research-bot",
     priority="normal",
     wallet={"balance": 100, "budget": 100, "max_per_txn": 10, "daily_spend_limit": 50},
@@ -87,9 +87,9 @@ else:
     print(f"Blocked: {result.block_reason}")
 
 # Manage rules
-kredit.agents.add_rule(agent.id, {"name": "Flights", "match": "flight.*", "max_cost_per_txn": 500})
-rules = kredit.agents.list_rules(agent.id)
-kredit.agents.remove_rule(agent.id, rule_id="rule_abc")
+kredit.rules.add(agent_id=agent.id, name="Flights", match="flight.*", max_cost_per_txn=500)
+rules = kredit.rules.list(agent_id=agent.id)
+kredit.rules.remove(agent_id=agent.id, rule_id="rule_abc")
 
 # Check score
 score = kredit.score(agent_id=agent.id)
@@ -103,7 +103,7 @@ import { Kredit } from "@kredit/kredit";
 const kredit = new Kredit({ apiKey: "kr_live_..." });
 
 const agent = await kredit.agents.create({
-  org: "my-team",
+  orgName: "my-team",
   name: "research-bot",
   wallet: { balance: 100, budget: 100, max_per_txn: 10, daily_spend_limit: 50 },
   rules: [
@@ -122,13 +122,13 @@ if (result.status === "allowed") {
 
 ```bash
 kredit orgs create --name=my-team
-kredit agents create --org=my-team --name=bot-01
-kredit rules add --agent=ID --name="OpenAI" --match="openai.*" --max-cost=5 --daily=30 --hourly=50
-kredit check --agent=ID --action=openai.chat --cost=2.50
-kredit report --agent=ID --txn=TXN_ID --outcome=success --cost=2.50
-kredit score --agent=ID
-kredit rules list --agent=ID
-kredit rules remove --agent=ID --rule=RULE_ID
+kredit agents create --org-name=my-team --name=bot-01
+kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=30 --hourly-rate-limit=50
+kredit check --agent-id=ID --action=openai.chat --estimated-cost=2.50
+kredit report --transaction-id=TXN_ID --outcome=success --actual-cost=2.50
+kredit score --agent-id=ID
+kredit rules list --agent-id=ID
+kredit rules remove --agent-id=ID --rule-id=RULE_ID
 ```
 
 ## API Endpoints

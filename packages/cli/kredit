@@ -3,14 +3,14 @@
 # kredit — CLI for the Kredit financial risk management API
 #
 # Usage:
-#   kredit check   --agent=AGT_ID --action=ACTION --cost=COST
-#   kredit report  --agent=AGT_ID --txn=TXN_ID --outcome=OUTCOME --cost=COST
-#   kredit agents  list --org=ORG_ID
-#   kredit agents  create --org=ORG_NAME --name=AGENT_NAME
+#   kredit check   --agent-id=ID --action=ACTION --estimated-cost=COST [--type=TYPE]
+#   kredit report  --transaction-id=ID --outcome=OUTCOME [--actual-cost=COST]
+#   kredit agents  list [--org-id=ORG_ID]
+#   kredit agents  create --org-name=ORG_NAME --name=AGENT_NAME
 #   kredit orgs    create --name=ORG_NAME
 #   kredit orgs    list
-#   kredit score   --agent=AGT_ID
-#   kredit wallet  --agent=AGT_ID
+#   kredit score   --agent-id=ID
+#   kredit wallet  --agent-id=ID
 #
 # Environment:
 #   KREDIT_API_KEY  — API key (or set in ~/.kredit/config as api_key=...)
@@ -28,7 +28,7 @@ resolve_api_key() {
     return
   fi
 
-  local config_file="$HOME/.kredit/config"
+  local config_file="${HOME:-$(eval echo ~)}/.kredit/config"
   if [ -f "$config_file" ]; then
     local key
     key=$(grep -E '^(api_key|KREDIT_API_KEY)=' "$config_file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' ')
@@ -93,13 +93,9 @@ api_request() {
       -H "User-Agent: kredit-cli/${VERSION}"
     )
 
-    if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
-      curl_args+=(-X "$method")
-      if [ -n "$data" ]; then
-        curl_args+=(-d "$data")
-      fi
-    elif [ "$method" = "GET" ]; then
-      curl_args+=(-X GET)
+    curl_args+=(-X "$method")
+    if [ -n "$data" ]; then
+      curl_args+=(-d "$data")
     fi
 
     curl_args+=("$url")
@@ -241,9 +237,11 @@ server.serve_forever()
   fi
 
   # Save to ~/.kredit/config
-  mkdir -p "$HOME/.kredit"
-  echo "api_key=${api_key}" > "$HOME/.kredit/config"
-  chmod 600 "$HOME/.kredit/config"
+  local home="${HOME:-$(eval echo ~)}"
+  mkdir -p "$home/.kredit"
+  touch "$home/.kredit/config"
+  echo "api_key=${api_key}" > "$home/.kredit/config"
+  chmod 600 "$home/.kredit/config"
 
   echo ""
   echo "API key created and saved to ~/.kredit/config"
@@ -359,8 +357,9 @@ cmd_demo() {
 }
 
 cmd_logout() {
-  if [ -f "$HOME/.kredit/config" ]; then
-    rm "$HOME/.kredit/config"
+  local home="${HOME:-$(eval echo ~)}"
+  if [ -f "$home/.kredit/config" ]; then
+    rm "$home/.kredit/config"
     echo "Logged out. API key removed from ~/.kredit/config"
   else
     echo "Not logged in."
@@ -373,55 +372,55 @@ cmd_rules() {
 
   case "$subcmd" in
     list)
-      local agent=""
+      local agent_id=""
       for arg in "$@"; do
         case "$arg" in
-          --agent=*) agent="${arg#--agent=}" ;;
-          --help) echo "Usage: kredit rules list --agent=AGENT_ID"; return 0 ;;
+          --agent-id=*) agent_id="${arg#--agent-id=}" ;;
+          --help) echo "Usage: kredit rules list --agent-id=ID"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
-      [ -z "$agent" ] && die "Missing --agent"
-      api_request GET "/agents/${agent}/rules"
+      [ -z "$agent_id" ] && die "Missing --agent-id"
+      api_request GET "/agents/${agent_id}/rules"
       ;;
     add)
-      local agent="" name="" match="*" max_cost=0 daily=0 hourly=0
+      local agent_id="" name="" match="*" max_cost_per_txn=0 daily_spend_limit=0 hourly_rate_limit=0
       for arg in "$@"; do
         case "$arg" in
-          --agent=*) agent="${arg#--agent=}" ;;
+          --agent-id=*) agent_id="${arg#--agent-id=}" ;;
           --name=*) name="${arg#--name=}" ;;
           --match=*) match="${arg#--match=}" ;;
-          --max-cost=*) max_cost="${arg#--max-cost=}" ;;
-          --daily=*) daily="${arg#--daily=}" ;;
-          --hourly=*) hourly="${arg#--hourly=}" ;;
-          --help) echo "Usage: kredit rules add --agent=ID --name=NAME --match=PATTERN --max-cost=N --daily=N --hourly=N"; return 0 ;;
+          --max-cost-per-txn=*) max_cost_per_txn="${arg#--max-cost-per-txn=}" ;;
+          --daily-spend-limit=*) daily_spend_limit="${arg#--daily-spend-limit=}" ;;
+          --hourly-rate-limit=*) hourly_rate_limit="${arg#--hourly-rate-limit=}" ;;
+          --help) echo "Usage: kredit rules add --agent-id=ID --name=NAME --match=PATTERN [--max-cost-per-txn=N] [--daily-spend-limit=N] [--hourly-rate-limit=N]"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
-      [ -z "$agent" ] && die "Missing --agent"
+      [ -z "$agent_id" ] && die "Missing --agent-id"
       [ -z "$name" ] && die "Missing --name"
-      api_request POST "/agents/${agent}/rules" "{\"name\":\"${name}\",\"match\":\"${match}\",\"max_cost_per_txn\":${max_cost},\"daily_spend_limit\":${daily},\"hourly_rate_limit\":${hourly}}"
+      api_request POST "/agents/${agent_id}/rules" "{\"name\":\"${name}\",\"match\":\"${match}\",\"max_cost_per_txn\":${max_cost_per_txn},\"daily_spend_limit\":${daily_spend_limit},\"hourly_rate_limit\":${hourly_rate_limit}}"
       ;;
     remove)
-      local agent="" rule=""
+      local agent_id="" rule_id=""
       for arg in "$@"; do
         case "$arg" in
-          --agent=*) agent="${arg#--agent=}" ;;
-          --rule=*) rule="${arg#--rule=}" ;;
-          --help) echo "Usage: kredit rules remove --agent=AGENT_ID --rule=RULE_ID"; return 0 ;;
+          --agent-id=*) agent_id="${arg#--agent-id=}" ;;
+          --rule-id=*) rule_id="${arg#--rule-id=}" ;;
+          --help) echo "Usage: kredit rules remove --agent-id=ID --rule-id=RULE_ID"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
-      [ -z "$agent" ] && die "Missing --agent"
-      [ -z "$rule" ] && die "Missing --rule"
-      api_request DELETE "/agents/${agent}/rules/${rule}"
+      [ -z "$agent_id" ] && die "Missing --agent-id"
+      [ -z "$rule_id" ] && die "Missing --rule-id"
+      api_request DELETE "/agents/${agent_id}/rules/${rule_id}"
       ;;
     --help|help)
       echo "Usage: kredit rules <list|add|remove>"
       echo ""
-      echo "  kredit rules list --agent=AGENT_ID"
-      echo "  kredit rules add --agent=ID --name=NAME --match=PATTERN --max-cost=N --daily=N --hourly=N"
-      echo "  kredit rules remove --agent=AGENT_ID --rule=RULE_ID"
+      echo "  kredit rules list --agent-id=ID"
+      echo "  kredit rules add --agent-id=ID --name=NAME --match=PATTERN [--max-cost-per-txn=N] [--daily-spend-limit=N] [--hourly-rate-limit=N]"
+      echo "  kredit rules remove --agent-id=ID --rule-id=RULE_ID"
       ;;
     "")
       die "Missing subcommand. Use: kredit rules <list|add|remove>"
@@ -435,45 +434,54 @@ cmd_rules() {
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 cmd_check() {
-  local agent="" action="" cost=""
+  local agent_id="" action="" estimated_cost="" type="api_call"
 
   for arg in "$@"; do
     case "$arg" in
-      --agent=*) agent="${arg#--agent=}" ;;
+      --agent-id=*) agent_id="${arg#--agent-id=}" ;;
       --action=*) action="${arg#--action=}" ;;
-      --cost=*) cost="${arg#--cost=}" ;;
-      --help) echo "Usage: kredit check --agent=AGT_ID --action=ACTION --cost=COST"; return 0 ;;
+      --estimated-cost=*) estimated_cost="${arg#--estimated-cost=}" ;;
+      --type=*) type="${arg#--type=}" ;;
+      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST [--type=TYPE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
 
-  [ -z "$agent" ] && die "Missing --agent"
+  [ -z "$agent_id" ] && die "Missing --agent-id"
   [ -z "$action" ] && die "Missing --action"
-  [ -z "$cost" ] && die "Missing --cost"
+  [ -z "$estimated_cost" ] && die "Missing --estimated-cost"
 
-  api_request POST "/check" "{\"agent_id\":\"${agent}\",\"action\":\"${action}\",\"estimated_cost\":${cost}}"
+  case "$type" in
+    api_call|compute|data|tool|other) ;;
+    *) die "Invalid --type: $type. Valid values: api_call, compute, data, tool, other" ;;
+  esac
+
+  api_request POST "/check" "{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\",\"estimated_cost\":${estimated_cost},\"type\":\"${type}\"}"
 }
 
 cmd_report() {
-  local agent="" txn="" outcome="" cost=""
+  local transaction_id="" outcome="" actual_cost=""
 
   for arg in "$@"; do
     case "$arg" in
-      --agent=*) agent="${arg#--agent=}" ;;
-      --txn=*) txn="${arg#--txn=}" ;;
+      --transaction-id=*) transaction_id="${arg#--transaction-id=}" ;;
       --outcome=*) outcome="${arg#--outcome=}" ;;
-      --cost=*) cost="${arg#--cost=}" ;;
-      --help) echo "Usage: kredit report --agent=AGT_ID --txn=TXN_ID --outcome=OUTCOME --cost=COST"; return 0 ;;
+      --actual-cost=*) actual_cost="${arg#--actual-cost=}" ;;
+      --help) echo "Usage: kredit report --transaction-id=ID --outcome=OUTCOME [--actual-cost=COST]"; echo "  OUTCOME: success, failure, partial"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
 
-  [ -z "$agent" ] && die "Missing --agent"
-  [ -z "$txn" ] && die "Missing --txn"
+  [ -z "$transaction_id" ] && die "Missing --transaction-id"
   [ -z "$outcome" ] && die "Missing --outcome"
-  [ -z "$cost" ] && die "Missing --cost"
 
-  api_request POST "/report" "{\"transaction_id\":\"${txn}\",\"outcome\":\"${outcome}\",\"actual_cost\":${cost}}"
+  local body="{\"transaction_id\":\"${transaction_id}\",\"outcome\":\"${outcome}\""
+  if [ -n "$actual_cost" ]; then
+    body="${body},\"actual_cost\":${actual_cost}"
+  fi
+  body="${body}}"
+
+  api_request POST "/report" "$body"
 }
 
 cmd_agents() {
@@ -482,36 +490,39 @@ cmd_agents() {
 
   case "$subcmd" in
     list)
-      local org=""
+      local org_id=""
       for arg in "$@"; do
         case "$arg" in
-          --org=*) org="${arg#--org=}" ;;
-          --help) echo "Usage: kredit agents list --org=ORG_ID"; return 0 ;;
+          --org-id=*) org_id="${arg#--org-id=}" ;;
+          --help) echo "Usage: kredit agents list [--org-id=ORG_ID]"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
-      [ -z "$org" ] && die "Missing --org"
-      api_request GET "/agents?org_id=${org}"
+      if [ -n "$org_id" ]; then
+        api_request GET "/agents?org_id=${org_id}"
+      else
+        api_request GET "/agents"
+      fi
       ;;
     create)
-      local org="" name=""
+      local org_name="" name=""
       for arg in "$@"; do
         case "$arg" in
-          --org=*) org="${arg#--org=}" ;;
+          --org-name=*) org_name="${arg#--org-name=}" ;;
           --name=*) name="${arg#--name=}" ;;
-          --help) echo "Usage: kredit agents create --org=ORG_NAME --name=AGENT_NAME"; return 0 ;;
+          --help) echo "Usage: kredit agents create --org-name=ORG_NAME --name=AGENT_NAME"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
-      [ -z "$org" ] && die "Missing --org"
+      [ -z "$org_name" ] && die "Missing --org-name"
       [ -z "$name" ] && die "Missing --name"
-      api_request POST "/agents" "{\"org_name\":\"${org}\",\"name\":\"${name}\"}"
+      api_request POST "/agents" "{\"org_name\":\"${org_name}\",\"name\":\"${name}\"}"
       ;;
     --help|help)
       echo "Usage: kredit agents <list|create>"
       echo ""
-      echo "  kredit agents list --org=ORG_ID"
-      echo "  kredit agents create --org=ORG_NAME --name=AGENT_NAME"
+      echo "  kredit agents list [--org-id=ORG_ID]"
+      echo "  kredit agents create --org-name=ORG_NAME --name=AGENT_NAME"
       ;;
     "")
       die "Missing subcommand. Use: kredit agents <list|create>"
@@ -558,33 +569,33 @@ cmd_orgs() {
 }
 
 cmd_score() {
-  local agent=""
+  local agent_id=""
 
   for arg in "$@"; do
     case "$arg" in
-      --agent=*) agent="${arg#--agent=}" ;;
-      --help) echo "Usage: kredit score --agent=AGT_ID"; return 0 ;;
+      --agent-id=*) agent_id="${arg#--agent-id=}" ;;
+      --help) echo "Usage: kredit score --agent-id=ID"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
 
-  [ -z "$agent" ] && die "Missing --agent"
-  api_request GET "/agents/${agent}/score"
+  [ -z "$agent_id" ] && die "Missing --agent-id"
+  api_request GET "/agents/${agent_id}/score"
 }
 
 cmd_wallet() {
-  local agent=""
+  local agent_id=""
 
   for arg in "$@"; do
     case "$arg" in
-      --agent=*) agent="${arg#--agent=}" ;;
-      --help) echo "Usage: kredit wallet --agent=AGT_ID"; return 0 ;;
+      --agent-id=*) agent_id="${arg#--agent-id=}" ;;
+      --help) echo "Usage: kredit wallet --agent-id=ID"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
 
-  [ -z "$agent" ] && die "Missing --agent"
-  api_request GET "/wallets/${agent}"
+  [ -z "$agent_id" ] && die "Missing --agent-id"
+  api_request GET "/wallets/${agent_id}"
 }
 
 show_help() {
@@ -611,14 +622,14 @@ Options:
   --version   Print version
 
 Examples:
-  kredit check --agent=agt_8f3k2m --action=serp_api.search --cost=1
-  kredit report --agent=agt_8f3k2m --txn=txn_abc --outcome=success --cost=1
-  kredit agents list --org=org_123
-  kredit agents create --org=research-team --name=bot-01
+  kredit check --agent-id=agt_8f3k2m --action=serp_api.search --estimated-cost=1 --type=api_call
+  kredit report --transaction-id=txn_abc --outcome=success --actual-cost=1
+  kredit agents list --org-id=org_123
+  kredit agents create --org-name=research-team --name=bot-01
+  kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100 --hourly-rate-limit=50
   kredit orgs create --name=research-team
-  kredit orgs list
-  kredit score --agent=agt_8f3k2m
-  kredit wallet --agent=agt_8f3k2m
+  kredit score --agent-id=agt_8f3k2m
+  kredit wallet --agent-id=agt_8f3k2m
 
 Environment:
   KREDIT_API_KEY   API key (or set in ~/.kredit/config as api_key=...)

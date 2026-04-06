@@ -14,7 +14,18 @@ from kredit.config import (
     resolve_base_url,
 )
 from kredit.exceptions import AuthError, KreditError, RiskDenied
-from kredit.models import Agent, CheckResult, Org, ScoreResult, Wallet
+from kredit.models import (
+    Agent,
+    AgentSpend,
+    CheckResult,
+    FleetOverview,
+    Org,
+    ReportResult,
+    Rule,
+    ScoreResult,
+    Transaction,
+    Wallet,
+)
 
 
 class _OrgsMixin:
@@ -45,28 +56,54 @@ class _AgentsMixin:
         *,
         name: str,
         org_id: str | None = None,
-        org: str | None = None,
+        org_name: str | None = None,
     ) -> Agent:
-        """Create an agent. Pass either org_id or org (name)."""
+        """Create an agent. Pass either org_id or org_name."""
         body: dict[str, Any] = {"name": name}
         if org_id is not None:
             body["org_id"] = org_id
-        elif org is not None:
-            body["org_name"] = org
+        elif org_name is not None:
+            body["org_name"] = org_name
         else:
-            raise KreditError("Either org_id or org must be provided")
+            raise KreditError("Either org_id or org_name must be provided")
         data = self._client._request("POST", "/agents", json=body)
         return Agent.model_validate(data)
 
-    def list(self, *, org_id: str) -> list[Agent]:
-        """List agents for an organization."""
-        data = self._client._request("GET", "/agents", params={"org_id": org_id})
+    def list(self, *, org_id: str | None = None) -> list[Agent]:
+        """List agents, optionally filtered by organization."""
+        params: dict[str, str] = {}
+        if org_id is not None:
+            params["org_id"] = org_id
+        data = self._client._request("GET", "/agents", params=params or None)
         return [Agent.model_validate(item) for item in data]
 
     def get(self, *, agent_id: str) -> Agent:
         """Get a single agent by ID."""
         data = self._client._request("GET", f"/agents/{agent_id}")
         return Agent.model_validate(data)
+
+    def update(
+        self,
+        *,
+        agent_id: str,
+        name: str | None = None,
+        priority: str | None = None,
+        wallet: dict | None = None,
+    ) -> Agent:
+        """Update an agent."""
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if priority is not None:
+            body["priority"] = priority
+        if wallet is not None:
+            body["wallet"] = wallet
+        data = self._client._request("PUT", f"/agents/{agent_id}", json=body)
+        return Agent.model_validate(data)
+
+    def delete(self, *, agent_id: str) -> None:
+        """Delete an agent."""
+        self._client._request("DELETE", f"/agents/{agent_id}")
 
 
 class _WalletMixin:
@@ -80,14 +117,85 @@ class _WalletMixin:
         data = self._client._request("GET", f"/wallets/{agent_id}")
         return Wallet.model_validate(data)
 
-    def set_budget(self, *, agent_id: str, budget: int) -> Wallet:
-        """Set wallet budget (in cents)."""
+    def set_budget(self, *, agent_id: str, budget: float) -> Wallet:
+        """Set wallet budget (dollars). Deprecated: use wallet.update() instead."""
         data = self._client._request(
             "PUT",
             f"/wallets/{agent_id}",
             json={"budget": budget},
         )
         return Wallet.model_validate(data)
+
+
+class _RulesMixin:
+    """Rule management methods, bound to a Kredit client instance."""
+
+    def __init__(self, client: Kredit) -> None:
+        self._client = client
+
+    def list(self, *, agent_id: str) -> list[Rule]:
+        """List rules for an agent."""
+        data = self._client._request("GET", f"/agents/{agent_id}/rules")
+        return [Rule.model_validate(item) for item in data]
+
+    def add(
+        self,
+        *,
+        agent_id: str,
+        name: str = "",
+        match: str = "*",
+        max_cost_per_txn: float = 0,
+        daily_spend_limit: float = 0,
+        hourly_rate_limit: int = 0,
+    ) -> Rule:
+        """Add a rule to an agent."""
+        body = {
+            "name": name,
+            "match": match,
+            "max_cost_per_txn": max_cost_per_txn,
+            "daily_spend_limit": daily_spend_limit,
+            "hourly_rate_limit": hourly_rate_limit,
+        }
+        data = self._client._request("POST", f"/agents/{agent_id}/rules", json=body)
+        return Rule.model_validate(data)
+
+    def update(self, *, agent_id: str, rule_id: str, **kwargs: Any) -> Rule:
+        """Update a rule on an agent."""
+        data = self._client._request(
+            "PUT", f"/agents/{agent_id}/rules/{rule_id}", json=kwargs
+        )
+        return Rule.model_validate(data)
+
+    def remove(self, *, agent_id: str, rule_id: str) -> None:
+        """Remove a rule from an agent."""
+        self._client._request("DELETE", f"/agents/{agent_id}/rules/{rule_id}")
+
+
+class _TransactionsMixin:
+    """Transaction query methods, bound to a Kredit client instance."""
+
+    def __init__(self, client: Kredit) -> None:
+        self._client = client
+
+    def list(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Transaction]:
+        """List transactions with optional filters."""
+        params: dict[str, Any] = {"limit": str(limit), "offset": str(offset)}
+        if agent_id:
+            params["agent_id"] = agent_id
+        if status:
+            params["status"] = status
+        if risk_level:
+            params["risk_level"] = risk_level
+        data = self._client._request("GET", "/transactions", params=params)
+        return [Transaction.model_validate(item) for item in data]
 
 
 class Kredit:
@@ -123,7 +231,7 @@ class Kredit:
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "kredit-python/0.1.0",
+                "User-Agent": "kredit-python/0.6.0",
             },
             timeout=self._timeout,
         )
@@ -131,6 +239,8 @@ class Kredit:
         self.orgs = _OrgsMixin(self)
         self.agents = _AgentsMixin(self)
         self.wallet = _WalletMixin(self)
+        self.rules = _RulesMixin(self)
+        self.transactions = _TransactionsMixin(self)
 
     def _request(
         self,
@@ -210,57 +320,64 @@ class Kredit:
         *,
         agent_id: str,
         action: str,
-        estimated_cost: int,
+        estimated_cost: float,
+        type: str = "api_call",
+        metadata: dict | None = None,
     ) -> CheckResult:
         """Run a risk check before executing an action.
 
-        This is the hot path — kept minimal for speed.
+        This is the hot path -- kept minimal for speed.
 
         Args:
             agent_id: The agent requesting the action.
             action: Action identifier (e.g. "serp_api.search").
-            estimated_cost: Estimated cost in cents.
+            estimated_cost: Estimated cost in dollars.
+            type: Transaction type (default "api_call").
+            metadata: Optional metadata dict.
 
         Returns:
             CheckResult with allow/deny decision and agent status.
         """
-        data = self._request(
-            "POST",
-            "/check",
-            json={
-                "agent_id": agent_id,
-                "action": action,
-                "estimated_cost": estimated_cost,
-            },
-        )
+        body: dict[str, Any] = {
+            "agent_id": agent_id,
+            "action": action,
+            "estimated_cost": estimated_cost,
+            "type": type,
+        }
+        if metadata is not None:
+            body["metadata"] = metadata
+        data = self._request("POST", "/check", json=body)
         return CheckResult.model_validate(data)
 
     def report(
         self,
         *,
-        agent_id: str,
-        txn_id: str,
+        transaction_id: str,
         outcome: str,
-        actual_cost: int,
-    ) -> None:
+        actual_cost: float | None = None,
+    ) -> ReportResult:
         """Report the outcome of an action after completion.
 
         Args:
-            agent_id: The agent that executed the action.
-            txn_id: Transaction ID from the check response.
-            outcome: Result of the action ("success", "failure", "error").
-            actual_cost: Actual cost incurred in cents.
+            transaction_id: Transaction ID from the check response.
+            outcome: Result of the action ("success", "failure", or "partial").
+            actual_cost: Actual cost incurred in dollars (optional).
+
+        Returns:
+            ReportResult with updated score and agent status.
         """
-        self._request(
-            "POST",
-            "/report",
-            json={
-                "agent_id": agent_id,
-                "txn_id": txn_id,
-                "outcome": outcome,
-                "actual_cost": actual_cost,
-            },
-        )
+        if outcome not in ("success", "failure", "partial"):
+            raise KreditError(
+                f"Invalid outcome '{outcome}': must be 'success', 'failure', or 'partial'"
+            )
+        body: dict[str, Any] = {
+            "transaction_id": transaction_id,
+            "outcome": outcome,
+        }
+        if actual_cost is not None:
+            body["actual_cost"] = actual_cost
+        data = self._request("POST", "/report", json=body)
+        return ReportResult.model_validate(data)
 
     def score(self, *, agent_id: str) -> ScoreResult:
         """Get the credit score for an agent.
@@ -273,6 +390,27 @@ class Kredit:
         """
         data = self._request("GET", f"/agents/{agent_id}/score")
         return ScoreResult.model_validate(data)
+
+    def fleet(self) -> FleetOverview:
+        """Get fleet-level overview stats.
+
+        Returns:
+            FleetOverview with aggregate metrics across all agents.
+        """
+        data = self._request("GET", "/fleet/overview")
+        return FleetOverview.model_validate(data)
+
+    def spend(self, *, agent_id: str) -> AgentSpend:
+        """Get spend breakdown for an agent.
+
+        Args:
+            agent_id: The agent to query.
+
+        Returns:
+            AgentSpend with total, daily, weekly, and monthly spend.
+        """
+        data = self._request("GET", f"/agents/{agent_id}/spend")
+        return AgentSpend.model_validate(data)
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
