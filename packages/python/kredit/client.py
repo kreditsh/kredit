@@ -231,7 +231,7 @@ class Kredit:
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "kredit-python/0.6.0",
+                "User-Agent": "kredit-python/0.7.0",
             },
             timeout=self._timeout,
         )
