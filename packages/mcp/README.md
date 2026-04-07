@@ -95,4 +95,4 @@ Claude calls `kredit_check` → allowed → books flight → `kredit_report` →
 
 - [kredit.sh](https://kredit.sh) — Dashboard
 - [Docs](https://kredit.sh/docs)
-- [GitHub](https://github.com/kreditsh/kredit-mcp)
+- [GitHub](https://github.com/kreditsh/kredit/tree/main/packages/mcp)

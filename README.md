@@ -205,6 +205,62 @@ All requests require `Authorization: Bearer kr_live_...` header.
 | GET | /fleet/overview | Fleet stats |
 | GET | /transactions | Audit log |
 
+## MCP (Claude Code / Claude Desktop)
+
+```bash
+npm i -g kredit-mcp
+```
+
+### Setup
+
+```bash
+# Add to Claude Code
+claude mcp add kredit -- kredit-mcp serve --api-key=kr_live_...
+
+# Or via env
+export KREDIT_API_KEY=kr_live_...
+claude mcp add kredit -- kredit-mcp serve
+```
+
+### Tools (22 total)
+
+| Tool | Description |
+|------|-------------|
+| `kredit_check` | Risk evaluation before a paid action |
+| `kredit_report` | Report outcome after action completes |
+| `kredit_list_orgs` | List all organizations |
+| `kredit_create_org` | Create an organization |
+| `kredit_rename_org` | Rename an organization |
+| `kredit_delete_org` | Delete an organization |
+| `kredit_list_agents` | List agents (filter by org) |
+| `kredit_create_agent` | Create agent with wallet, priority, rules |
+| `kredit_get_agent` | Get agent details |
+| `kredit_update_agent` | Update name, priority, wallet |
+| `kredit_delete_agent` | Delete an agent |
+| `kredit_list_rules` | List rules for an agent |
+| `kredit_add_rule` | Add a spending rule (match pattern + limits) |
+| `kredit_update_rule` | Update a rule |
+| `kredit_delete_rule` | Delete a rule |
+| `kredit_score` | Get credit score and stats |
+| `kredit_wallet` | Get wallet balance and limits |
+| `kredit_update_wallet` | Update wallet balance, budget, limits |
+| `kredit_fleet` | Fleet overview stats |
+| `kredit_transactions` | List transactions (audit log) |
+| `kredit_events` | Agent state change history |
+
+### Example
+
+After setup, Claude can:
+
+```
+"Create an org called my-team, add an agent called travel-bot
+with a $5000 budget and a rule that caps flight bookings at $800"
+```
+
+Claude will call `kredit_create_org` → `kredit_create_agent` → `kredit_add_rule`.
+
+Then before any paid action, Claude calls `kredit_check` → allowed → does action → `kredit_report` → score updates.
+
 ## Links
 
 - **Dashboard**: https://kredit.sh
