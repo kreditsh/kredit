@@ -187,23 +187,57 @@ Base URL: `https://api.kredit.sh`
 
 All requests require `Authorization: Bearer kr_live_...` header.
 
+**Risk Check & Report**
+
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | /check | Risk evaluation |
 | POST | /report | Report outcome |
-| GET/POST | /agents | List/create agents |
+
+**Organizations**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /orgs | List orgs |
+| POST | /orgs | Create org |
+| PUT | /orgs/:id | Rename org |
+| DELETE | /orgs/:id | Delete org |
+
+**Agents**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /agents | List agents |
+| POST | /agents | Create agent |
+| GET | /agents/:id | Get agent |
 | PUT | /agents/:id | Update agent |
 | DELETE | /agents/:id | Delete agent |
-| GET/POST | /agents/:id/rules | List/add rules |
+
+**Rules**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /agents/:id/rules | List rules |
+| POST | /agents/:id/rules | Add rule |
 | PUT | /agents/:id/rules/:rule_id | Update rule |
 | DELETE | /agents/:id/rules/:rule_id | Delete rule |
+
+**Score & Wallet**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | GET | /agents/:id/score | Credit score |
 | GET | /agents/:id/spend | Spend breakdown |
-| GET/POST | /orgs | List/create orgs |
 | GET | /wallets/:id | Get wallet |
 | PUT | /wallets/:id | Update wallet |
+
+**Fleet & Logs**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | GET | /fleet/overview | Fleet stats |
 | GET | /transactions | Audit log |
+| GET | /agents/:id/events | Agent events |
 
 ## MCP (Claude Code / Claude Desktop)
 
