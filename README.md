@@ -58,24 +58,59 @@ kredit score --agent-id=AGENT_ID
 
 ### Python
 
+```bash
+pip install kredit
+```
+
 ```python
 from kredit import Kredit
 
 kredit = Kredit(api_key="kr_live_...")
+```
 
-# Create agent with wallet and rules
+**Organizations**
+
+```python
+org = kredit.orgs.create(name="my-team")
+orgs = kredit.orgs.list()
+```
+
+**Agents**
+
+```python
 agent = kredit.agents.create(
     org_name="my-team",
     name="travel-bot",
     priority="high",
     wallet={"balance": 5000, "budget": 5000, "max_per_txn": 1000, "daily_spend_limit": 5000},
-    rules=[
-        {"name": "Flight cap", "match": "flight.*", "max_cost_per_txn": 800, "daily_spend_limit": 3000, "hourly_rate_limit": 10},
-        {"name": "Default", "match": "*", "max_cost_per_txn": 500, "daily_spend_limit": 2000, "hourly_rate_limit": 50},
-    ],
 )
 
-# Risk check
+agents = kredit.agents.list(org_id=org.id)
+agent = kredit.agents.get(agent_id=agent.id)
+kredit.agents.update(agent_id=agent.id, priority="critical")
+kredit.agents.delete(agent_id=agent.id)
+```
+
+**Rules**
+
+```python
+kredit.rules.add(
+    agent_id=agent.id,
+    name="Flight cap",
+    match="flight.*",
+    max_cost_per_txn=800,
+    daily_spend_limit=3000,
+    hourly_rate_limit=10,
+)
+
+rules = kredit.rules.list(agent_id=agent.id)
+kredit.rules.update(agent_id=agent.id, rule_id=rules[0].id, max_cost_per_txn=1000)
+kredit.rules.remove(agent_id=agent.id, rule_id=rules[0].id)
+```
+
+**Check & Report**
+
+```python
 result = kredit.check(agent_id=agent.id, action="flight.booking", estimated_cost=450)
 
 if result.status == "allowed":
@@ -83,33 +118,87 @@ if result.status == "allowed":
     kredit.report(transaction_id=result.transaction_id, outcome="success", actual_cost=425)
 else:
     print(f"Blocked: {result.block_reason}")
-    # → "rule:Flight cap:max_cost_per_txn"
+```
+
+**Score, Spend & Fleet**
+
+```python
+score = kredit.score(agent_id=agent.id)          # score.score, score.status
+spend = kredit.spend(agent_id=agent.id)           # spend.total_spend, spend.daily_spend
+fleet = kredit.fleet()                            # fleet.total_agents, fleet.total_spend
+txns = kredit.transactions.list(agent_id=agent.id)
 ```
 
 ### JavaScript
+
+```bash
+npm i @kredit/kredit
+```
 
 ```typescript
 import { Kredit } from "@kredit/kredit";
 
 const kredit = new Kredit({ apiKey: "kr_live_..." });
+```
 
+**Organizations**
+
+```typescript
+const org = await kredit.orgs.create({ name: "my-team" });
+const orgs = await kredit.orgs.list();
+```
+
+**Agents**
+
+```typescript
 const agent = await kredit.agents.create({
   orgName: "my-team",
   name: "travel-bot",
   priority: "high",
   wallet: { balance: 5000, budget: 5000, max_per_txn: 1000, daily_spend_limit: 5000 },
-  rules: [
-    { name: "Flight cap", match: "flight.*", max_cost_per_txn: 800, daily_spend_limit: 3000, hourly_rate_limit: 10 },
-    { name: "Default", match: "*", max_cost_per_txn: 500, daily_spend_limit: 2000, hourly_rate_limit: 50 },
-  ],
 });
 
+const agents = await kredit.agents.list({ orgId: org.id });
+const agentDetail = await kredit.agents.get({ agentId: agent.id });
+await kredit.agents.update({ agentId: agent.id, priority: "critical" });
+await kredit.agents.delete({ agentId: agent.id });
+```
+
+**Rules**
+
+```typescript
+await kredit.rules.add({
+  agentId: agent.id,
+  name: "Flight cap",
+  match: "flight.*",
+  max_cost_per_txn: 800,
+  daily_spend_limit: 3000,
+  hourly_rate_limit: 10,
+});
+
+const rules = await kredit.rules.list({ agentId: agent.id });
+await kredit.rules.update({ agentId: agent.id, ruleId: rules[0].id, max_cost_per_txn: 1000 });
+await kredit.rules.remove({ agentId: agent.id, ruleId: rules[0].id });
+```
+
+**Check & Report**
+
+```typescript
 const result = await kredit.check({ agentId: agent.id, action: "flight.booking", estimatedCost: 450 });
 
 if (result.status === "allowed") {
   const booking = await bookFlight(params);
   await kredit.report({ transactionId: result.transaction_id, outcome: "success", actualCost: 425 });
 }
+```
+
+**Score, Spend & Fleet**
+
+```typescript
+const score = await kredit.score({ agentId: agent.id });    // score.score, score.status
+const spend = await kredit.spend({ agentId: agent.id });     // spend.total_spend, spend.daily_spend
+const fleet = await kredit.fleet();                           // fleet.total_agents, fleet.total_spend
+const txns = await kredit.transactions.list({ agentId: agent.id });
 ```
 
 ## Rules
