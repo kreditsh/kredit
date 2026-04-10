@@ -355,7 +355,7 @@ export class Kredit {
 					headers: {
 						Authorization: `Bearer ${this.apiKey}`,
 						"Content-Type": "application/json",
-						"User-Agent": "kredit-typescript/0.7.0",
+						"User-Agent": "kredit-typescript/0.7.1",
 					},
 					body: options?.body ? JSON.stringify(options.body) : undefined,
 					signal: controller.signal,
