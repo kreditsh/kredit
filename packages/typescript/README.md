@@ -1,420 +1,124 @@
-# Kredit
+# @kredit/kredit
 
-Risk management for AI agents. Every agent gets a wallet, a credit score, and spending rules.
-
-- **Wallets** — balance, budget, global spend limits
-- **Rules** — per-action limits with pattern matching (`openai.*`, `flight.*`, `*`)
-- **Credit scoring** — 300-850 score based on success rate, cost efficiency, compliance
-- **Priority levels** — normal, high (auto-topup), critical (never blocked)
+Risk management SDK for AI agents. Wallets, spending rules, and kredit scores.
 
 ## Install
 
 ```bash
-# CLI
-curl -sSL https://kredit.sh/install | sh
-
-# Python
-pip install kredit
-
-# JavaScript
 npm i @kredit/kredit
-
-# MCP (Claude Code / Claude Desktop)
-npm i -g kredit-mcp
-```
-
-## Get Your API Key
-
-```bash
-# Via CLI (opens browser, creates key automatically)
-kredit login
-
-# Or from the dashboard: https://kredit.sh → API Key → Create New Key
 ```
 
 ## Quick Start
-
-### CLI
-
-```bash
-# Create an org and agent
-kredit orgs create --name=my-team
-kredit agents create --org-name=my-team --name=research-bot
-
-# Add spending rules
-kredit rules add --agent-id=AGENT_ID --name="OpenAI cap" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100 --hourly-rate-limit=50
-kredit rules add --agent-id=AGENT_ID --name="Default" --match="*" --max-cost-per-txn=10 --daily-spend-limit=500 --hourly-rate-limit=200
-
-# Risk check before an API call
-kredit check --agent-id=AGENT_ID --action=openai.chat --estimated-cost=2.50
-# → { "status": "allowed", "risk_level": "low", "transaction_id": "..." }
-
-# Report outcome
-kredit report --transaction-id=TXN_ID --outcome=success --actual-cost=2.50
-
-# Check credit score
-kredit score --agent-id=AGENT_ID
-```
-
-### Python
-
-```bash
-pip install kredit
-```
-
-```python
-from kredit import Kredit
-
-kredit = Kredit(api_key="kr_live_...")
-```
-
-**Organizations**
-
-```python
-org = kredit.orgs.create(name="my-team")
-orgs = kredit.orgs.list()
-```
-
-**Agents**
-
-```python
-agent = kredit.agents.create(
-    org_name="my-team",
-    name="travel-bot",
-    priority="high",
-    wallet={"balance": 5000, "budget": 5000, "max_per_txn": 1000, "daily_spend_limit": 5000},
-)
-
-agents = kredit.agents.list(org_id=org.id)
-agent = kredit.agents.get(agent_id=agent.id)
-kredit.agents.update(agent_id=agent.id, priority="critical")
-kredit.agents.delete(agent_id=agent.id)
-```
-
-**Rules**
-
-```python
-kredit.rules.add(
-    agent_id=agent.id,
-    name="Flight cap",
-    match="flight.*",
-    max_cost_per_txn=800,
-    daily_spend_limit=3000,
-    hourly_rate_limit=10,
-)
-
-rules = kredit.rules.list(agent_id=agent.id)
-kredit.rules.update(agent_id=agent.id, rule_id=rules[0].id, max_cost_per_txn=1000)
-kredit.rules.remove(agent_id=agent.id, rule_id=rules[0].id)
-```
-
-**Check & Report**
-
-```python
-result = kredit.check(agent_id=agent.id, action="flight.booking", estimated_cost=450)
-
-if result.status == "allowed":
-    booking = book_flight(params)
-    kredit.report(transaction_id=result.transaction_id, outcome="success", actual_cost=425)
-else:
-    print(f"Blocked: {result.block_reason}")
-```
-
-**Score, Spend & Fleet**
-
-```python
-score = kredit.score(agent_id=agent.id)          # score.score, score.status
-spend = kredit.spend(agent_id=agent.id)           # spend.total_spend, spend.daily_spend
-fleet = kredit.fleet()                            # fleet.total_agents, fleet.total_spend
-txns = kredit.transactions.list(agent_id=agent.id)
-```
-
-### JavaScript
-
-```bash
-npm i @kredit/kredit
-```
 
 ```typescript
 import { Kredit } from "@kredit/kredit";
 
 const kredit = new Kredit({ apiKey: "kr_live_..." });
+
+const result = await kredit.check({ agentId: "bot-01", action: "openai.chat", estimatedCost: 2.50 });
+
+if (result.status === "allowed") {
+  // do the action...
+  await kredit.report({ transactionId: result.transaction_id, outcome: "success", actualCost: 2.40 });
+}
 ```
 
-**Organizations**
+## Organizations
 
 ```typescript
 const org = await kredit.orgs.create({ name: "my-team" });
 const orgs = await kredit.orgs.list();
 ```
 
-**Agents**
+## Agents
 
 ```typescript
 const agent = await kredit.agents.create({
   orgName: "my-team",
-  name: "travel-bot",
+  name: "research-bot",
   priority: "high",
-  wallet: { balance: 5000, budget: 5000, max_per_txn: 1000, daily_spend_limit: 5000 },
+  wallet: { balance: 5000, budget: 5000, max_per_txn: 100, daily_spend_limit: 1000 },
 });
 
 const agents = await kredit.agents.list({ orgId: org.id });
-const agentDetail = await kredit.agents.get({ agentId: agent.id });
+const detail = await kredit.agents.get({ agentId: agent.id });
 await kredit.agents.update({ agentId: agent.id, priority: "critical" });
 await kredit.agents.delete({ agentId: agent.id });
 ```
 
-**Rules**
+## Rules
 
 ```typescript
 await kredit.rules.add({
   agentId: agent.id,
-  name: "Flight cap",
-  match: "flight.*",
-  max_cost_per_txn: 800,
-  daily_spend_limit: 3000,
-  hourly_rate_limit: 10,
+  name: "OpenAI cap",
+  match: "openai.*",
+  max_cost_per_txn: 5,
+  daily_spend_limit: 100,
+  hourly_rate_limit: 50,
 });
 
 const rules = await kredit.rules.list({ agentId: agent.id });
-await kredit.rules.update({ agentId: agent.id, ruleId: rules[0].id, max_cost_per_txn: 1000 });
+await kredit.rules.update({ agentId: agent.id, ruleId: rules[0].id, max_cost_per_txn: 10 });
 await kredit.rules.remove({ agentId: agent.id, ruleId: rules[0].id });
 ```
 
-**Check & Report**
+## Check & Report
 
 ```typescript
-const result = await kredit.check({ agentId: agent.id, action: "flight.booking", estimatedCost: 450 });
+const result = await kredit.check({
+  agentId: agent.id,
+  action: "flight.booking",
+  estimatedCost: 450,
+  type: "api_call",
+  metadata: { provider: "kayak" },
+});
 
 if (result.status === "allowed") {
   const booking = await bookFlight(params);
-  await kredit.report({ transactionId: result.transaction_id, outcome: "success", actualCost: 425 });
+  await kredit.report({
+    transactionId: result.transaction_id,
+    outcome: "success",
+    actualCost: 425,
+  });
+} else {
+  console.log(`Blocked: ${result.block_reason}`);
 }
 ```
 
-**Score, Spend & Fleet**
+## Score, Spend & Fleet
 
 ```typescript
-const score = await kredit.score({ agentId: agent.id });    // score.score, score.status
-const spend = await kredit.spend({ agentId: agent.id });     // spend.total_spend, spend.daily_spend
-const fleet = await kredit.fleet();                           // fleet.total_agents, fleet.total_spend
-const txns = await kredit.transactions.list({ agentId: agent.id });
-```
-
-## Rules
-
-Rules define per-action spending limits. Each rule has a `match` pattern (fnmatch) and limits:
-
-```json
-{
-  "name": "OpenAI cap",
-  "match": "openai.*",
-  "max_cost_per_txn": 5.0,
-  "daily_spend_limit": 100.0,
-  "hourly_rate_limit": 50,
-  "enabled": true
-}
-```
-
-When an action is checked, the most specific matching rule applies. `flight.*` beats `*` for `flight.booking`.
-
-```bash
-kredit rules add --agent-id=ID --name="Flight cap" --match="flight.*" --max-cost-per-txn=800 --daily-spend-limit=3000 --hourly-rate-limit=10
-kredit rules list --agent-id=ID
-kredit rules remove --agent-id=ID --rule-id=RULE_ID
+const score = await kredit.score({ agentId: agent.id });
+const spend = await kredit.spend({ agentId: agent.id });
+const fleet = await kredit.fleet();
+const txns = await kredit.transactions.list({ agentId: agent.id, status: "blocked" });
 ```
 
 ## Wallet
 
-Each agent has a wallet with global limits:
-
-| Field | Description |
-|-------|-------------|
-| `balance` | Current balance (dollars) |
-| `budget` | Total allocated (dollars) |
-| `max_per_txn` | Global max per transaction, 0 = unlimited |
-| `daily_spend_limit` | Global max spend per day, 0 = unlimited |
-
-## Priority
-
-| Level | Behavior |
-|-------|----------|
-| `normal` | Blocked when limits hit |
-| `high` | Auto-increase wallet by 50% when balance < 10% of budget |
-| `critical` | Never blocked — always allowed, logs warning |
-
-## Credit Score
-
-Agents earn a credit score (300-850) based on:
-- Task success rate (30%)
-- Cost efficiency (25%)
-- Violation rate (20%)
-- Spend consistency (15%)
-- Tenure bonus (10%)
-
-Score thresholds:
-- **600+** → active
-- **400-600** → throttled (reduced limits)
-- **<400** → frozen (blocked, needs human approval)
-
-## Check Order
-
-1. Priority override (critical → always allow)
-2. Frozen status check
-3. High priority auto-increase
-4. Global wallet: `max_per_txn`
-5. Global wallet: `daily_spend_limit`
-6. Wallet balance
-7. Rules: match action pattern → most specific wins
-8. Credit score < 400 → block
-9. Anomaly detection (10x avg cost)
-10. Score-based risk escalation
-
-## API
-
-Base URL: `https://api.kredit.sh`
-
-All requests require `Authorization: Bearer kr_live_...` header.
-
-**Risk Check & Report**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /check | Risk evaluation |
-| POST | /report | Report outcome |
-
-**Organizations**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /orgs | List orgs |
-| POST | /orgs | Create org |
-| PUT | /orgs/:id | Rename org |
-| DELETE | /orgs/:id | Delete org |
-
-**Agents**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /agents | List agents |
-| POST | /agents | Create agent |
-| GET | /agents/:id | Get agent |
-| PUT | /agents/:id | Update agent |
-| DELETE | /agents/:id | Delete agent |
-
-**Rules**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /agents/:id/rules | List rules |
-| POST | /agents/:id/rules | Add rule |
-| PUT | /agents/:id/rules/:rule_id | Update rule |
-| DELETE | /agents/:id/rules/:rule_id | Delete rule |
-
-**Score & Wallet**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /agents/:id/score | Credit score |
-| GET | /agents/:id/spend | Spend breakdown |
-| GET | /wallets/:id | Get wallet |
-| PUT | /wallets/:id | Update wallet |
-
-**Fleet & Logs**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /fleet/overview | Fleet stats |
-| GET | /transactions | Audit log |
-| GET | /agents/:id/events | Agent events |
-
-## MCP (Claude Code / Claude Desktop)
-
-```bash
-npm i -g kredit-mcp
+```typescript
+const wallet = await kredit.wallet.get({ agentId: agent.id });
+await kredit.wallet.update({ agentId: agent.id, budget: 10000, daily_spend_limit: 2000 });
 ```
 
-### Setup
+## Authentication
 
-```bash
-# Add to Claude Code
-claude mcp add kredit -- kredit-mcp serve --api-key=kr_live_...
+```typescript
+// Pass directly
+const kredit = new Kredit({ apiKey: "kr_live_..." });
 
-# Or via env
-export KREDIT_API_KEY=kr_live_...
-claude mcp add kredit -- kredit-mcp serve
+// Or use env var: KREDIT_API_KEY
+const kredit = new Kredit();
+
+// Or use ~/.kredit/config file (created by `kredit login`)
+const kredit = new Kredit();
 ```
-
-### Tools (22 total)
-
-**Organizations**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_list_orgs` | List all organizations |
-| `kredit_create_org` | Create an organization |
-| `kredit_rename_org` | Rename an organization |
-| `kredit_delete_org` | Delete an organization |
-
-**Agents**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_list_agents` | List agents (filter by org) |
-| `kredit_create_agent` | Create agent with wallet, priority, rules |
-| `kredit_get_agent` | Get agent details |
-| `kredit_update_agent` | Update name, priority, wallet |
-| `kredit_delete_agent` | Delete an agent |
-
-**Rules**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_list_rules` | List rules for an agent |
-| `kredit_add_rule` | Add a spending rule (match pattern + limits) |
-| `kredit_update_rule` | Update a rule |
-| `kredit_delete_rule` | Delete a rule |
-
-**Risk Check & Report**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_check` | Risk evaluation before a paid action |
-| `kredit_report` | Report outcome after action completes |
-
-**Score & Wallet**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_score` | Get credit score and stats |
-| `kredit_wallet` | Get wallet balance and limits |
-| `kredit_update_wallet` | Update wallet balance, budget, limits |
-
-**Fleet & Logs**
-
-| Tool | Description |
-|------|-------------|
-| `kredit_fleet` | Fleet overview stats |
-| `kredit_transactions` | List transactions (audit log) |
-| `kredit_events` | Agent state change history |
-
-### Example
-
-After setup, Claude can:
-
-```
-"Create an org called my-team, add an agent called travel-bot
-with a $5000 budget and a rule that caps flight bookings at $800"
-```
-
-Claude will call `kredit_create_org` → `kredit_create_agent` → `kredit_add_rule`.
-
-Then before any paid action, Claude calls `kredit_check` → allowed → does action → `kredit_report` → score updates.
 
 ## Links
 
-- **Dashboard**: https://kredit.sh
-- **Docs**: https://kredit.sh/docs
-- **npm**: [@kredit/kredit](https://www.npmjs.com/package/@kredit/kredit)
-- **PyPI**: [kredit](https://pypi.org/project/kredit/)
-- **MCP**: [kredit-mcp](https://www.npmjs.com/package/kredit-mcp)
+- [Dashboard](https://kredit.sh)
+- [Docs](https://kredit.sh/docs)
+- [GitHub](https://github.com/kreditsh/kredit)
+- [PyPI](https://pypi.org/project/kredit/)
+- [MCP](https://www.npmjs.com/package/kredit-mcp)
