@@ -319,7 +319,7 @@ _cmd_demo_inner() {
   }
 
   # Rule profiles tuned so well-behaved agents pass through cleanly.
-  # rogue-spender is the only one designed to consistently violate.
+  # ad-bid-optimizer is the only one designed to consistently violate.
   local R_OPENAI='[{"name":"OpenAI cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":2000}]'
   local R_CLAUDE='[{"name":"Claude cap","match":"anthropic.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":5,"daily_spend_limit":1000}]'
   local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":10,"daily_spend_limit":1500},{"name":"GitHub","match":"github.*","max_cost_per_txn":1,"daily_spend_limit":500}]'
@@ -331,16 +331,16 @@ _cmd_demo_inner() {
   local R_DATA='[{"name":"Postgres","match":"postgres.*","max_cost_per_txn":0.5,"daily_spend_limit":100},{"name":"Redis","match":"redis.*","max_cost_per_txn":0.05,"daily_spend_limit":20}]'
   local R_ROGUE='[{"name":"Tight cap","match":"*","max_cost_per_txn":15,"daily_spend_limit":100}]'
 
-  _mk_agent "gpt-writer"      "critical" 5000 5000 5    1000 "$R_OPENAI"
-  _mk_agent "claude-agent"    "high"     5000 5000 5    1000 "$R_CLAUDE"
-  _mk_agent "code-assistant"  "high"     5000 5000 10   1500 "$R_CODE"
-  _mk_agent "research-bot"    "normal"   3000 3000 8    500  "$R_RESEARCH"
-  _mk_agent "travel-agent"    "high"    30000 30000 800 15000 "$R_TRAVEL"
-  _mk_agent "procurement-bot" "normal"  20000 20000 1000 15000 "$R_PROC"
-  _mk_agent "cloud-deployer"  "high"     5000 5000 50   2000 "$R_CLOUD"
-  _mk_agent "comms-bot"       "normal"   1000 1000 1    200  "$R_COMMS"
-  _mk_agent "data-agent"      "normal"   1000 1000 0.5  100  "$R_DATA"
-  _mk_agent "rogue-spender"   "normal"   500  500  15   100  "$R_ROGUE"
+  _mk_agent "content-pipeline"      "critical" 5000 5000 5    1000 "$R_OPENAI"
+  _mk_agent "support-tier-1"    "high"     5000 5000 5    1000 "$R_CLAUDE"
+  _mk_agent "code-review-bot"  "high"     5000 5000 10   1500 "$R_CODE"
+  _mk_agent "market-intel"    "normal"   3000 3000 8    500  "$R_RESEARCH"
+  _mk_agent "booking-ops"    "high"    30000 30000 800 15000 "$R_TRAVEL"
+  _mk_agent "vendor-payments" "normal"  20000 20000 1000 15000 "$R_PROC"
+  _mk_agent "infra-deploy"  "high"     5000 5000 50   2000 "$R_CLOUD"
+  _mk_agent "notifications"       "normal"   1000 1000 1    200  "$R_COMMS"
+  _mk_agent "data-sync"      "normal"   1000 1000 0.5  100  "$R_DATA"
+  _mk_agent "ad-bid-optimizer"   "normal"   500  500  15   100  "$R_ROGUE"
 
   local total=${#agents[@]}
   echo ""
@@ -364,13 +364,13 @@ _cmd_demo_inner() {
   # some agents look healthy (active), some get throttled, rogue freezes.
   _outcome_pcts() {
     case "$1" in
-      gpt-writer|claude-agent|code-assistant|travel-agent|cloud-deployer)
+      content-pipeline|support-tier-1|code-review-bot|booking-ops|infra-deploy)
         echo "92 6" ;;   # well-behaved → score ~780-820
-      data-agent|procurement-bot)
+      data-sync|vendor-payments)
         echo "82 12" ;;  # reliable → score ~700-760
-      research-bot|comms-bot)
+      market-intel|notifications)
         echo "60 25" ;;  # messy → score ~500-600 (throttled)
-      rogue-spender)
+      ad-bid-optimizer)
         echo "35 25" ;;  # bad actor → score ~350-450 (throttled/frozen)
       *)
         echo "80 15" ;;
@@ -387,19 +387,19 @@ _cmd_demo_inner() {
     local aid="${agents[$idx]}" aname="${names[$idx]}"
 
     # Cost ranges tuned to mostly fit within each agent's max_cost_per_txn rule.
-    # rogue-spender deliberately exceeds its $15 cap to trigger blocks.
+    # ad-bid-optimizer deliberately exceeds its $15 cap to trigger blocks.
     local action cost
     case "$aname" in
-      gpt-writer)      action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
-      claude-agent)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
-      code-assistant)  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
-      research-bot)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
-      travel-agent)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
-      procurement-bot) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
-      cloud-deployer)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%4500)+100)/100.0}");;
-      comms-bot)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40)+1)/100.0}");;
-      data-agent)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35)+1)/100.0}");;
-      rogue-spender)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+2000)/100.0}");;
+      content-pipeline)      action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      support-tier-1)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      code-review-bot)  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
+      market-intel)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
+      booking-ops)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
+      vendor-payments) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
+      infra-deploy)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%4500)+100)/100.0}");;
+      notifications)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40)+1)/100.0}");;
+      data-sync)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35)+1)/100.0}");;
+      ad-bid-optimizer)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+2000)/100.0}");;
       *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
     esac
 
