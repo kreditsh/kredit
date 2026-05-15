@@ -348,8 +348,8 @@ _cmd_demo_inner() {
   # ── Phase 3: Run 60-second transaction burst ─────────────────────────────
   echo "[3/3] Running 60s of transactions..."
   echo ""
-  printf "  %-8s %-18s %-22s %10s   %-8s  %8s  %8s   %-6s  %s\n" "T+ms" "AGENT" "ACTION" "COST" "STATUS" "DEC(ms)" "NET(ms)" "RISK" "DETAIL"
-  echo "  ─────────────────────────────────────────────────────────────────────────────────────────────────────"
+  printf "  %-6s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TX#" "AGENT" "ACTION" "COST" "STATUS" "RISK" "DETAIL"
+  echo "  ──────────────────────────────────────────────────────────────────────────────────────"
 
   # 25 distinct APIs across categories (>= 20 as requested)
   local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
@@ -362,7 +362,7 @@ _cmd_demo_inner() {
   local start_s end_s
   start_s=$(date +%s)
   end_s=$((start_s + 60))
-  local tx=0 allowed=0 blocked=0 flagged=0 total_latency=0
+  local tx=0 allowed=0 blocked=0 flagged=0
 
   while [ "$(date +%s)" -lt "$end_s" ]; do
     local idx=$((RANDOM % total))
@@ -380,18 +380,11 @@ _cmd_demo_inner() {
       *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%1000)+10)/100.0}");;
     esac
 
-    # Single curl call gives both response body AND request latency — no python wrappers
-    local resp_with_time result latency_sec latency status txn_id risk reason
-    resp_with_time=$(curl -s -w "\n%{time_total}" -X POST "${BASE_URL}/check" \
+    local result status txn_id risk reason
+    result=$(curl -s -X POST "${BASE_URL}/check" \
       -H "Authorization: Bearer ${API_KEY}" \
       -H "Content-Type: application/json" \
       -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
-    latency_sec=$(printf "%s" "$resp_with_time" | tail -n 1)
-    result=$(printf "%s" "$resp_with_time" | sed '$d')
-    [ -z "$latency_sec" ] && latency_sec="0"
-    latency=$(awk -v l="$latency_sec" 'BEGIN{printf "%d", l*1000}')
-    [ -z "$latency" ] && latency=0
-    total_latency=$((total_latency + latency))
 
     status=$(printf "%s" "$result" | jq -r '.status // "error"' 2>/dev/null)
     [ -z "$status" ] && status="error"
@@ -400,16 +393,7 @@ _cmd_demo_inner() {
     [ -z "$risk" ] && risk="-"
     reason=$(printf "%s" "$result" | jq -r '.block_reason // ""' 2>/dev/null)
 
-    # Server-side decision latency from response body (what Kredit's risk engine reports)
-    local server_lat
-    server_lat=$(printf "%s" "$result" | jq -r '.latency_ms // 0' 2>/dev/null)
-    [ -z "$server_lat" ] && server_lat=0
-    local server_lat_int
-    server_lat_int=$(awk -v l="$server_lat" 'BEGIN{printf "%d", l}')
-
     tx=$((tx + 1))
-    # Cumulative latency gives ms-precision T+ offset without needing high-res clocks
-    local t_offset=$total_latency
 
     case "$status" in
       allowed)
@@ -427,16 +411,15 @@ _cmd_demo_inner() {
     esac
 
     local detail="$reason"
-    printf "  +%-7d %-18s %-22s \$%9s   %-8s  %8d  %8d   %-6s  %s\n" \
-      "$t_offset" "$aname" "$action" "$cost" "$status" "$server_lat_int" "$latency" "$risk" "$detail"
+    printf "  #%-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
+      "$tx" "$aname" "$action" "$cost" "$status" "$risk" "$detail"
   done
   wait
 
-  local elapsed_s avg_lat throughput
+  local elapsed_s throughput
   elapsed_s=$(( $(date +%s) - start_s ))
   [ "$elapsed_s" -lt 1 ] && elapsed_s=1
   [ "$tx" -lt 1 ] && tx=1
-  avg_lat=$((total_latency / tx))
   throughput=$(awk "BEGIN{printf \"%.1f\",$tx/$elapsed_s}")
 
   echo ""
@@ -453,7 +436,6 @@ _cmd_demo_inner() {
   printf "  %-14s %d\n"    "Allowed:"    "$allowed"
   printf "  %-14s %d\n"    "Blocked:"    "$blocked"
   printf "  %-14s %d\n"    "Flagged:"    "$flagged"
-  printf "  %-14s %dms\n"  "Avg latency:" "$avg_lat"
   echo ""
   echo "  Credit score changes:"
   local i=0
