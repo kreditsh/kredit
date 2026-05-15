@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -259,18 +259,15 @@ cmd_demo() {
   echo "  ╚═══════════════════════════════════╝"
   echo ""
 
-  # Create demo org
+  # Create demo org (unique name per run)
+  local org_name="kredit-demo-$(date +%Y%m%d-%H%M%S)"
   echo "Creating demo org..."
   local org_result
-  org_result=$(curl -s -X POST "${BASE_URL}/orgs" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d '{"name":"kredit-demo"}' 2>/dev/null)
+  org_result=$(curl -s -X POST "${BASE_URL}/orgs" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"name\":\"${org_name}\"}" 2>/dev/null)
   local org_id
   org_id=$(echo "$org_result" | jq -r '.id // empty' 2>/dev/null)
-  if [ -z "$org_id" ]; then
-    # Org might already exist
-    org_id=$(curl -s -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/orgs" | jq -r '.[] | select(.name=="kredit-demo") | .id' 2>/dev/null)
-  fi
   [ -z "$org_id" ] && die "Failed to create demo org"
-  echo "  Org: kredit-demo ($org_id)"
+  echo "  Org: ${org_name} ($org_id)"
 
   # Create agents
   echo "Creating agents..."
@@ -279,7 +276,7 @@ cmd_demo() {
   _create_demo_agent() {
     local name="$1" priority="$2" balance="$3" budget="$4" max_txn="$5" daily="$6" rules="$7"
     local wallet="{\"balance\":$balance,\"budget\":$budget,\"max_per_txn\":$max_txn,\"daily_spend_limit\":$daily}"
-    local body="{\"org_name\":\"kredit-demo\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
+    local body="{\"org_name\":\"${org_name}\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
     local id
     id=$(curl -s -X POST "${BASE_URL}/agents" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "$body" | jq -r '.id // empty' 2>/dev/null)
     if [ -n "$id" ]; then
