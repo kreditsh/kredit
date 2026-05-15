@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -253,104 +253,207 @@ server.serve_forever()
 cmd_demo() {
   require_api_key
 
+  local home="${HOME:-$(eval echo ~)}"
+  mkdir -p "$home/.kredit"
+  local LOG_FILE="$home/.kredit/sim-$(date +%Y%m%d-%H%M%S).log"
+  _cmd_demo_inner 2>&1 | tee "$LOG_FILE"
+}
+
+_cmd_demo_inner() {
   echo ""
-  echo "  ╔═══════════════════════════════════╗"
-  echo "  ║       Kredit Demo Simulation      ║"
-  echo "  ╚═══════════════════════════════════╝"
+  echo "  ╔═══════════════════════════════════════════════════════╗"
+  echo "  ║         Kredit 60-Second Demo Simulation              ║"
+  echo "  ║         10 agents · many transactions · per-second    ║"
+  echo "  ╚═══════════════════════════════════════════════════════╝"
+  echo ""
+  echo "  Log file: $LOG_FILE"
+  echo "  Dashboard: https://kredit.sh/dashboard/spend"
   echo ""
 
-  # Create demo org (unique name per run)
+  # ── Phase 1: Create unique org ───────────────────────────────────────────
   local org_name="kredit-demo-$(date +%Y%m%d-%H%M%S)"
-  echo "Creating demo org..."
-  local org_result
-  org_result=$(curl -s -X POST "${BASE_URL}/orgs" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"name\":\"${org_name}\"}" 2>/dev/null)
-  local org_id
-  org_id=$(echo "$org_result" | jq -r '.id // empty' 2>/dev/null)
-  [ -z "$org_id" ] && die "Failed to create demo org"
-  echo "  Org: ${org_name} ($org_id)"
+  echo "[1/3] Creating org: $org_name"
+  local org_response org_id
+  org_response=$(curl -s -X POST "${BASE_URL}/orgs" \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"$org_name\"}" 2>/dev/null)
+  org_id=$(echo "$org_response" | jq -r '.id // empty' 2>/dev/null)
+  [ -z "$org_id" ] && die "Failed to create org: $org_response"
+  echo "      org_id: $org_id"
+  echo ""
 
-  # Create agents
-  echo "Creating agents..."
-  local agents=() names=()
+  # ── Phase 2: Create 10 agents with diverse rule profiles ─────────────────
+  echo "[2/3] Creating 10 agents..."
+  echo ""
+  local agents=() names=() init_scores=()
 
-  _create_demo_agent() {
+  _mk_agent() {
     local name="$1" priority="$2" balance="$3" budget="$4" max_txn="$5" daily="$6" rules="$7"
     local wallet="{\"balance\":$balance,\"budget\":$budget,\"max_per_txn\":$max_txn,\"daily_spend_limit\":$daily}"
-    local body="{\"org_name\":\"${org_name}\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
-    local id
-    id=$(curl -s -X POST "${BASE_URL}/agents" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "$body" | jq -r '.id // empty' 2>/dev/null)
+    local body="{\"org_name\":\"$org_name\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
+    local resp id
+    resp=$(curl -s -X POST "${BASE_URL}/agents" \
+      -H "Authorization: Bearer ${API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$body" 2>/dev/null)
+    id=$(echo "$resp" | jq -r '.id // empty' 2>/dev/null)
     if [ -n "$id" ]; then
       agents+=("$id")
       names+=("$name")
+      local score
+      score=$(echo "$resp" | jq -r '.credit.score // 600')
+      init_scores+=("$score")
+      printf "      ✓ %-18s priority=%-8s balance=\$%-5d budget=\$%-5d max=\$%-4d daily=\$%-5d  id=%s\n" \
+        "$name" "$priority" "$balance" "$budget" "$max_txn" "$daily" "$id"
+      echo "$resp" | jq -r '.rules[] | "          rule: \(.name) match=\(.match) max_cost=$\(.max_cost_per_txn // "-") daily=$\(.daily_spend_limit // "-") rate=\(.hourly_rate_limit // "-")"'
+    else
+      echo "      ✗ failed: $name — $resp"
     fi
   }
 
-  local R_API='[{"name":"API cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":100,"hourly_rate_limit":50},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":200,"hourly_rate_limit":100}]'
-  local R_SPEND='[{"name":"Purchase cap","match":"*","max_cost_per_txn":500,"daily_spend_limit":2000,"hourly_rate_limit":20}]'
+  local R_OPENAI='[{"name":"OpenAI cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":100,"hourly_rate_limit":120},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":200}]'
+  local R_CLAUDE='[{"name":"Claude cap","match":"anthropic.*","max_cost_per_txn":3,"daily_spend_limit":80,"hourly_rate_limit":120},{"name":"Default","match":"*","max_cost_per_txn":2}]'
+  local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":8,"daily_spend_limit":150,"hourly_rate_limit":200},{"name":"GitHub","match":"github.*","max_cost_per_txn":0.5,"hourly_rate_limit":200}]'
+  local R_RESEARCH='[{"name":"Search","match":"serp.*","max_cost_per_txn":2,"hourly_rate_limit":80},{"name":"Scrape","match":"browserless.*","max_cost_per_txn":5,"hourly_rate_limit":60},{"name":"Default","match":"*","max_cost_per_txn":5}]'
+  local R_TRAVEL='[{"name":"Flight cap","match":"flight.*","max_cost_per_txn":800,"daily_spend_limit":2000,"hourly_rate_limit":10},{"name":"Hotel cap","match":"hotel.*","max_cost_per_txn":400,"daily_spend_limit":1000,"hourly_rate_limit":10}]'
+  local R_PROC='[{"name":"Vendor cap","match":"vendor.*","max_cost_per_txn":1000,"daily_spend_limit":5000,"hourly_rate_limit":20},{"name":"Equip cap","match":"equipment.*","max_cost_per_txn":500,"daily_spend_limit":2000}]'
+  local R_CLOUD='[{"name":"AWS cap","match":"aws.*","max_cost_per_txn":50,"daily_spend_limit":500,"hourly_rate_limit":120}]'
+  local R_COMMS='[{"name":"Slack","match":"slack.*","max_cost_per_txn":0.5,"hourly_rate_limit":120},{"name":"Email","match":"sendgrid.*","max_cost_per_txn":1,"hourly_rate_limit":60},{"name":"SMS","match":"twilio.*","max_cost_per_txn":0.5,"hourly_rate_limit":30}]'
+  local R_DATA='[{"name":"Postgres","match":"postgres.*","max_cost_per_txn":0.5,"hourly_rate_limit":300},{"name":"Redis","match":"redis.*","max_cost_per_txn":0.01,"hourly_rate_limit":600}]'
+  local R_ROGUE='[{"name":"Tight cap","match":"*","max_cost_per_txn":15,"daily_spend_limit":100}]'
 
-  _create_demo_agent "research-bot" "critical" 500 500 0 0 "$R_API"
-  _create_demo_agent "code-assistant" "high" 200 200 0 0 "$R_API"
-  _create_demo_agent "data-scraper" "normal" 100 100 5 100 "$R_API"
-  _create_demo_agent "travel-agent" "high" 5000 5000 1000 5000 "$R_SPEND"
-  _create_demo_agent "procurement-bot" "normal" 2000 2000 500 2000 "$R_SPEND"
+  _mk_agent "gpt-writer"      "critical" 500  500  5    100  "$R_OPENAI"
+  _mk_agent "claude-agent"    "high"     400  400  3    80   "$R_CLAUDE"
+  _mk_agent "code-assistant"  "high"     250  250  8    150  "$R_CODE"
+  _mk_agent "research-bot"    "normal"   300  300  5    100  "$R_RESEARCH"
+  _mk_agent "travel-agent"    "high"     5000 5000 800  2000 "$R_TRAVEL"
+  _mk_agent "procurement-bot" "normal"   2000 2000 1000 5000 "$R_PROC"
+  _mk_agent "cloud-deployer"  "high"     400  400  50   500  "$R_CLOUD"
+  _mk_agent "comms-bot"       "normal"   100  100  1    50   "$R_COMMS"
+  _mk_agent "data-agent"      "low"      150  150  1    50   "$R_DATA"
+  _mk_agent "rogue-spender"   "low"      300  300  15   100  "$R_ROGUE"
 
   local total=${#agents[@]}
-  echo "  Created $total agents"
   echo ""
-  echo "  Open your dashboard to watch in real time:"
-  echo "  https://kredit.sh/dashboard"
+  echo "      Created $total agents"
   echo ""
-  echo "  Running 1-hour simulation (Ctrl+C to stop)..."
+
+  # ── Phase 3: Run 60-second transaction burst ─────────────────────────────
+  echo "[3/3] Running 60s of transactions..."
   echo ""
-  printf "  %-6s %-18s %-24s %9s  %-8s  %s\n" "TIME" "AGENT" "ACTION" "COST" "RESULT" "DETAIL"
+  printf "  %-7s %-18s %-22s %10s  %-8s %5s %-6s  %s\n" "T+ms" "AGENT" "ACTION" "COST" "STATUS" "ms" "RISK" "DETAIL"
   echo "  ─────────────────────────────────────────────────────────────────────────────────────"
 
-  local API_ACTIONS=("openai.chat" "openai.embeddings" "anthropic.messages" "serp_api.search" "github.api.repos" "slack.post_message" "datadog.metrics" "postgres.query")
-  local SPEND_ACTIONS=("flight.booking" "hotel.booking" "equipment.purchase" "office_supplies.order" "software.license" "catering.order")
+  local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "datadog.metric")
+  local SPEND_ACTIONS=("flight.booking" "hotel.booking" "vendor.payout" "equipment.purchase" "software.license")
+  local INFRA_ACTIONS=("aws.ec2.run" "aws.s3.put" "aws.lambda.invoke" "aws.rds.query")
+  local COMMS_ACTIONS=("slack.post" "sendgrid.email" "twilio.sms")
+  local DATA_ACTIONS=("postgres.query" "redis.set" "redis.get")
   local OUTCOMES=("success" "success" "success" "success" "failure" "partial")
 
-  local START=$(date +%s) END=$(($(date +%s) + 3600)) TX=0
+  local start_ms end_ms now_ms
+  start_ms=$(python3 -c "import time;print(int(time.time()*1000))")
+  end_ms=$((start_ms + 60000))
+  local tx=0 allowed=0 blocked=0 flagged=0 total_latency=0
 
-  while [ $(date +%s) -lt $END ]; do
-    local IDX=$((RANDOM % total))
-    local AID="${agents[$IDX]}" ANAME="${names[$IDX]}"
+  while :; do
+    now_ms=$(python3 -c "import time;print(int(time.time()*1000))")
+    [ "$now_ms" -ge "$end_ms" ] && break
 
-    local ACTION COST
-    if [[ "$ANAME" == travel-* ]] || [[ "$ANAME" == procurement-* ]]; then
-      ACTION="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}"
-      COST=$(awk "BEGIN{printf \"%.2f\", (($RANDOM % 49500) + 500) / 100.0}")
-    else
-      ACTION="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}"
-      COST=$(awk "BEGIN{printf \"%.2f\", (($RANDOM % 500) + 1) / 100.0}")
-    fi
+    local idx=$((RANDOM % total))
+    local aid="${agents[$idx]}" aname="${names[$idx]}"
 
-    local RESULT
-    RESULT=$(curl -s -X POST "${BASE_URL}/check" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"agent_id\":\"$AID\",\"action\":\"$ACTION\",\"estimated_cost\":$COST}" 2>/dev/null)
-    local TXN_ID STATUS RISK REASON
-    TXN_ID=$(echo "$RESULT" | jq -r '.transaction_id // empty' 2>/dev/null)
-    STATUS=$(echo "$RESULT" | jq -r '.status' 2>/dev/null)
-    REASON=$(echo "$RESULT" | jq -r '.block_reason // ""' 2>/dev/null)
+    local action cost
+    case "$aname" in
+      travel-agent)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%50000)+1000)/100.0}");;
+      procurement-bot) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%30000)+500)/100.0}");;
+      cloud-deployer)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%6000)+100)/100.0}");;
+      comms-bot)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%100)+1)/100.0}");;
+      data-agent)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%50)+1)/100.0}");;
+      rogue-spender)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+500)/100.0}");;
+      claude-agent)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
+      *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%1000)+10)/100.0}");;
+    esac
 
-    TX=$((TX + 1))
-    local ELAPSED=$(( $(date +%s) - START ))
-    local TS=$(printf "%02d:%02d" "$((ELAPSED / 60))" "$((ELAPSED % 60))")
+    local t1 t2 result status txn_id risk reason latency
+    t1=$(python3 -c "import time;print(int(time.time()*1000))")
+    result=$(curl -s -X POST "${BASE_URL}/check" \
+      -H "Authorization: Bearer ${API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
+    t2=$(python3 -c "import time;print(int(time.time()*1000))")
+    latency=$((t2 - t1))
+    total_latency=$((total_latency + latency))
 
-    if [ "$STATUS" = "allowed" ] && [ -n "$TXN_ID" ]; then
-      local OC="${OUTCOMES[$((RANDOM % ${#OUTCOMES[@]}))]}"
-      local AC=$COST
-      [ "$OC" = "failure" ] && AC=$(awk "BEGIN{printf \"%.2f\", $COST * 0.3}")
-      curl -s -X POST "${BASE_URL}/report" -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" -d "{\"transaction_id\":\"$TXN_ID\",\"outcome\":\"$OC\",\"actual_cost\":$AC}" > /dev/null 2>&1
-      printf "  %-6s %-18s %-24s \$%8s  %-8s\n" "$TS" "$ANAME" "$ACTION" "$COST" "$OC"
-    else
-      printf "  %-6s %-18s %-24s \$%8s  %-8s  %s\n" "$TS" "$ANAME" "$ACTION" "$COST" "BLOCKED" "$REASON"
-    fi
+    status=$(echo "$result" | jq -r '.status // "error"' 2>/dev/null)
+    txn_id=$(echo "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
+    risk=$(echo "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
+    reason=$(echo "$result" | jq -r '.block_reason // ""' 2>/dev/null)
 
-    sleep $(( (RANDOM % 8) + 3 ))
+    tx=$((tx + 1))
+    local t_offset=$((t2 - start_ms))
+
+    case "$status" in
+      allowed)
+        allowed=$((allowed + 1))
+        local outcome="${OUTCOMES[$((RANDOM % ${#OUTCOMES[@]}))]}"
+        local ac=$cost
+        [ "$outcome" = "failure" ] && ac=$(awk "BEGIN{printf \"%.2f\",$cost*0.3}")
+        [ -n "$txn_id" ] && curl -s -X POST "${BASE_URL}/report" \
+          -H "Authorization: Bearer ${API_KEY}" \
+          -H "Content-Type: application/json" \
+          -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1 &
+        ;;
+      blocked) blocked=$((blocked + 1)) ;;
+      flagged) flagged=$((flagged + 1)) ;;
+    esac
+
+    local detail="$reason"
+    printf "  +%-6d %-18s %-22s \$%9s  %-8s %5d %-6s  %s\n" \
+      "$t_offset" "$aname" "$action" "$cost" "$status" "$latency" "$risk" "$detail"
   done
+  wait
+
+  local final_ms elapsed_s avg_lat throughput
+  final_ms=$(python3 -c "import time;print(int(time.time()*1000))")
+  elapsed_s=$(( (final_ms - start_ms) / 1000 ))
+  [ "$elapsed_s" -lt 1 ] && elapsed_s=1
+  avg_lat=$((total_latency / tx))
+  throughput=$(awk "BEGIN{printf \"%.1f\",$tx/$elapsed_s}")
 
   echo ""
-  echo "  Demo complete: $TX transactions"
-  echo "  View results: https://kredit.sh/dashboard"
+  echo "  ═══════════════════════════════════════════════════════"
+  echo "  Simulation summary"
+  echo "  ═══════════════════════════════════════════════════════"
+  echo ""
+  printf "  %-14s %s\n"    "Org:"        "$org_name"
+  printf "  %-14s %s\n"    "Org ID:"     "$org_id"
+  printf "  %-14s %s\n"    "Agents:"     "$total"
+  printf "  %-14s %ss\n"   "Duration:"   "$elapsed_s"
+  printf "  %-14s %d\n"    "Total tx:"   "$tx"
+  printf "  %-14s %s tx/s\n" "Throughput:" "$throughput"
+  printf "  %-14s %d\n"    "Allowed:"    "$allowed"
+  printf "  %-14s %d\n"    "Blocked:"    "$blocked"
+  printf "  %-14s %d\n"    "Flagged:"    "$flagged"
+  printf "  %-14s %dms\n"  "Avg latency:" "$avg_lat"
+  echo ""
+  echo "  Credit score changes:"
+  local i=0
+  while [ $i -lt $total ]; do
+    local aid="${agents[$i]}" aname="${names[$i]}" init="${init_scores[$i]}"
+    local final_score
+    final_score=$(curl -s -H "Authorization: Bearer ${API_KEY}" "${BASE_URL}/agents/${aid}" 2>/dev/null | jq -r '.credit.score // 600')
+    local delta=$((final_score - init))
+    local sign=""
+    [ "$delta" -gt 0 ] && sign="+"
+    printf "    %-18s %3d → %3d  (%s%d)\n" "$aname" "$init" "$final_score" "$sign" "$delta"
+    i=$((i + 1))
+  done
+  echo ""
+  echo "  Dashboard: https://kredit.sh/dashboard/spend (toggle to Second view)"
+  echo "  Log file:  $LOG_FILE"
+  echo ""
 }
 
 cmd_logout() {
