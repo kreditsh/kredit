@@ -418,8 +418,8 @@ _cmd_demo_inner() {
         else
           outcome="failure"
         fi
-        local ac=$cost
-        [ "$outcome" = "failure" ] && ac=$(awk "BEGIN{printf \"%.2f\",$cost*1.4}")
+        # Actual cost varies ±20% from estimate — independent of outcome
+        local ac=$(awk -v c="$cost" -v r="$RANDOM" 'BEGIN{printf "%.2f", c*(0.8+(r%41)/100.0)}')
         [ -n "$txn_id" ] && curl -s -X POST "${BASE_URL}/report" \
           -H "Authorization: Bearer ${API_KEY}" \
           -H "Content-Type: application/json" \
