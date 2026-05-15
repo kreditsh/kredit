@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -331,8 +331,8 @@ _cmd_demo_inner() {
   _mk_agent "procurement-bot" "normal"   2000 2000 1000 5000 "$R_PROC"
   _mk_agent "cloud-deployer"  "high"     400  400  50   500  "$R_CLOUD"
   _mk_agent "comms-bot"       "normal"   100  100  1    50   "$R_COMMS"
-  _mk_agent "data-agent"      "low"      150  150  1    50   "$R_DATA"
-  _mk_agent "rogue-spender"   "low"      300  300  15   100  "$R_ROGUE"
+  _mk_agent "data-agent"      "normal"   150  150  1    50   "$R_DATA"
+  _mk_agent "rogue-spender"   "normal"   300  300  15   100  "$R_ROGUE"
 
   local total=${#agents[@]}
   echo ""
@@ -345,22 +345,20 @@ _cmd_demo_inner() {
   printf "  %-7s %-18s %-22s %10s  %-8s %5s %-6s  %s\n" "T+ms" "AGENT" "ACTION" "COST" "STATUS" "ms" "RISK" "DETAIL"
   echo "  ─────────────────────────────────────────────────────────────────────────────────────"
 
-  local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "datadog.metric")
-  local SPEND_ACTIONS=("flight.booking" "hotel.booking" "vendor.payout" "equipment.purchase" "software.license")
+  # 25 distinct APIs across categories (>= 20 as requested)
+  local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
+  local SPEND_ACTIONS=("flight.booking" "hotel.booking" "vendor.payout" "equipment.purchase" "software.license" "catering.order")
   local INFRA_ACTIONS=("aws.ec2.run" "aws.s3.put" "aws.lambda.invoke" "aws.rds.query")
   local COMMS_ACTIONS=("slack.post" "sendgrid.email" "twilio.sms")
   local DATA_ACTIONS=("postgres.query" "redis.set" "redis.get")
   local OUTCOMES=("success" "success" "success" "success" "failure" "partial")
 
-  local start_ms end_ms now_ms
-  start_ms=$(python3 -c "import time;print(int(time.time()*1000))")
-  end_ms=$((start_ms + 60000))
+  local start_s end_s
+  start_s=$(date +%s)
+  end_s=$((start_s + 60))
   local tx=0 allowed=0 blocked=0 flagged=0 total_latency=0
 
-  while :; do
-    now_ms=$(python3 -c "import time;print(int(time.time()*1000))")
-    [ "$now_ms" -ge "$end_ms" ] && break
-
+  while [ "$(date +%s)" -lt "$end_s" ]; do
     local idx=$((RANDOM % total))
     local aid="${agents[$idx]}" aname="${names[$idx]}"
 
@@ -376,14 +374,15 @@ _cmd_demo_inner() {
       *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%1000)+10)/100.0}");;
     esac
 
-    local t1 t2 result status txn_id risk reason latency
-    t1=$(python3 -c "import time;print(int(time.time()*1000))")
-    result=$(curl -s -X POST "${BASE_URL}/check" \
+    # Single curl call gives both response body AND request latency — no python wrappers
+    local resp_with_time result latency_sec latency status txn_id risk reason
+    resp_with_time=$(curl -s -w "\n%{time_total}" -X POST "${BASE_URL}/check" \
       -H "Authorization: Bearer ${API_KEY}" \
       -H "Content-Type: application/json" \
       -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
-    t2=$(python3 -c "import time;print(int(time.time()*1000))")
-    latency=$((t2 - t1))
+    latency_sec=$(echo "$resp_with_time" | tail -1)
+    result=$(echo "$resp_with_time" | sed '$d')
+    latency=$(awk "BEGIN{printf \"%d\",$latency_sec*1000}")
     total_latency=$((total_latency + latency))
 
     status=$(echo "$result" | jq -r '.status // "error"' 2>/dev/null)
@@ -392,7 +391,7 @@ _cmd_demo_inner() {
     reason=$(echo "$result" | jq -r '.block_reason // ""' 2>/dev/null)
 
     tx=$((tx + 1))
-    local t_offset=$((t2 - start_ms))
+    local t_offset=$(( ($(date +%s) - start_s) * 1000 ))
 
     case "$status" in
       allowed)
@@ -415,10 +414,10 @@ _cmd_demo_inner() {
   done
   wait
 
-  local final_ms elapsed_s avg_lat throughput
-  final_ms=$(python3 -c "import time;print(int(time.time()*1000))")
-  elapsed_s=$(( (final_ms - start_ms) / 1000 ))
+  local elapsed_s avg_lat throughput
+  elapsed_s=$(( $(date +%s) - start_s ))
   [ "$elapsed_s" -lt 1 ] && elapsed_s=1
+  [ "$tx" -lt 1 ] && tx=1
   avg_lat=$((total_latency / tx))
   throughput=$(awk "BEGIN{printf \"%.1f\",$tx/$elapsed_s}")
 
