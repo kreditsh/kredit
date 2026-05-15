@@ -359,11 +359,23 @@ _cmd_demo_inner() {
   local INFRA_ACTIONS=("aws.ec2.run" "aws.s3.put" "aws.lambda.invoke" "aws.rds.query")
   local COMMS_ACTIONS=("slack.post" "sendgrid.email" "twilio.sms")
   local DATA_ACTIONS=("postgres.query" "redis.set" "redis.get")
-  # Outcome distribution is a probability roll on each report.
-  # Tune these once; everything else stays clean.
-  local OUTCOME_SUCCESS_PCT=85   # 0-84  → success
-  local OUTCOME_PARTIAL_PCT=10   # 85-94 → partial
-  # remainder                    # 95-99 → failure
+  # Outcome distribution is a probability roll on each report — and it
+  # varies per agent so the demo produces a spread of credit scores:
+  # some agents look healthy (active), some get throttled, rogue freezes.
+  _outcome_pcts() {
+    case "$1" in
+      gpt-writer|claude-agent|code-assistant|travel-agent|cloud-deployer)
+        echo "92 6" ;;   # well-behaved → score ~780-820
+      data-agent|procurement-bot)
+        echo "82 12" ;;  # reliable → score ~700-760
+      research-bot|comms-bot)
+        echo "60 25" ;;  # messy → score ~500-600 (throttled)
+      rogue-spender)
+        echo "35 25" ;;  # bad actor → score ~350-450 (throttled/frozen)
+      *)
+        echo "80 15" ;;
+    esac
+  }
 
   local start_s end_s
   start_s=$(date +%s)
@@ -409,11 +421,14 @@ _cmd_demo_inner() {
     case "$status" in
       allowed)
         allowed=$((allowed + 1))
+        local pcts success_pct partial_pct outcome
+        pcts=$(_outcome_pcts "$aname")
+        success_pct=${pcts%% *}
+        partial_pct=${pcts##* }
         local roll=$((RANDOM % 100))
-        local outcome
-        if [ "$roll" -lt "$OUTCOME_SUCCESS_PCT" ]; then
+        if [ "$roll" -lt "$success_pct" ]; then
           outcome="success"
-        elif [ "$roll" -lt "$((OUTCOME_SUCCESS_PCT + OUTCOME_PARTIAL_PCT))" ]; then
+        elif [ "$roll" -lt "$((success_pct + partial_pct))" ]; then
           outcome="partial"
         else
           outcome="failure"
