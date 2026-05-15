@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -260,6 +260,12 @@ cmd_demo() {
 }
 
 _cmd_demo_inner() {
+  # Relax strict mode inside the demo — individual curl/jq hiccups must
+  # not kill the simulation loop. We still log them in the output.
+  set +e
+  set +u
+  set +o pipefail
+
   echo ""
   echo "  ╔═══════════════════════════════════════════════════════╗"
   echo "  ║         Kredit 60-Second Demo Simulation              ║"
@@ -306,7 +312,7 @@ _cmd_demo_inner() {
       init_scores+=("$score")
       printf "      ✓ %-18s priority=%-8s balance=\$%-5d budget=\$%-5d max=\$%-4d daily=\$%-5d  id=%s\n" \
         "$name" "$priority" "$balance" "$budget" "$max_txn" "$daily" "$id"
-      echo "$resp" | jq -r '.rules[] | "          rule: \(.name) match=\(.match) max_cost=$\(.max_cost_per_txn // "-") daily=$\(.daily_spend_limit // "-") rate=\(.hourly_rate_limit // "-")"'
+      echo "$resp" | jq -r '.rules[] | "          rule: \(.name) [match=\(.match)]" + (if .max_cost_per_txn > 0 then "  max_cost=$\(.max_cost_per_txn)" else "" end) + (if .daily_spend_limit > 0 then "  daily=$\(.daily_spend_limit)" else "" end) + (if .hourly_rate_limit > 0 then "  rate=\(.hourly_rate_limit)/hr" else "" end)'
     else
       echo "      ✗ failed: $name — $resp"
     fi
@@ -342,8 +348,8 @@ _cmd_demo_inner() {
   # ── Phase 3: Run 60-second transaction burst ─────────────────────────────
   echo "[3/3] Running 60s of transactions..."
   echo ""
-  printf "  %-7s %-18s %-22s %10s  %-8s %5s %-6s  %s\n" "T+ms" "AGENT" "ACTION" "COST" "STATUS" "ms" "RISK" "DETAIL"
-  echo "  ─────────────────────────────────────────────────────────────────────────────────────"
+  printf "  %-8s %-18s %-22s %10s   %-8s  %8s  %8s   %-6s  %s\n" "T+ms" "AGENT" "ACTION" "COST" "STATUS" "DEC(ms)" "NET(ms)" "RISK" "DETAIL"
+  echo "  ─────────────────────────────────────────────────────────────────────────────────────────────────────"
 
   # 25 distinct APIs across categories (>= 20 as requested)
   local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
@@ -380,18 +386,30 @@ _cmd_demo_inner() {
       -H "Authorization: Bearer ${API_KEY}" \
       -H "Content-Type: application/json" \
       -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
-    latency_sec=$(echo "$resp_with_time" | tail -1)
-    result=$(echo "$resp_with_time" | sed '$d')
-    latency=$(awk "BEGIN{printf \"%d\",$latency_sec*1000}")
+    latency_sec=$(printf "%s" "$resp_with_time" | tail -n 1)
+    result=$(printf "%s" "$resp_with_time" | sed '$d')
+    [ -z "$latency_sec" ] && latency_sec="0"
+    latency=$(awk -v l="$latency_sec" 'BEGIN{printf "%d", l*1000}')
+    [ -z "$latency" ] && latency=0
     total_latency=$((total_latency + latency))
 
-    status=$(echo "$result" | jq -r '.status // "error"' 2>/dev/null)
-    txn_id=$(echo "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
-    risk=$(echo "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
-    reason=$(echo "$result" | jq -r '.block_reason // ""' 2>/dev/null)
+    status=$(printf "%s" "$result" | jq -r '.status // "error"' 2>/dev/null)
+    [ -z "$status" ] && status="error"
+    txn_id=$(printf "%s" "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
+    risk=$(printf "%s" "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
+    [ -z "$risk" ] && risk="-"
+    reason=$(printf "%s" "$result" | jq -r '.block_reason // ""' 2>/dev/null)
+
+    # Server-side decision latency from response body (what Kredit's risk engine reports)
+    local server_lat
+    server_lat=$(printf "%s" "$result" | jq -r '.latency_ms // 0' 2>/dev/null)
+    [ -z "$server_lat" ] && server_lat=0
+    local server_lat_int
+    server_lat_int=$(awk -v l="$server_lat" 'BEGIN{printf "%d", l}')
 
     tx=$((tx + 1))
-    local t_offset=$(( ($(date +%s) - start_s) * 1000 ))
+    # Cumulative latency gives ms-precision T+ offset without needing high-res clocks
+    local t_offset=$total_latency
 
     case "$status" in
       allowed)
@@ -409,8 +427,8 @@ _cmd_demo_inner() {
     esac
 
     local detail="$reason"
-    printf "  +%-6d %-18s %-22s \$%9s  %-8s %5d %-6s  %s\n" \
-      "$t_offset" "$aname" "$action" "$cost" "$status" "$latency" "$risk" "$detail"
+    printf "  +%-7d %-18s %-22s \$%9s   %-8s  %8d  %8d   %-6s  %s\n" \
+      "$t_offset" "$aname" "$action" "$cost" "$status" "$server_lat_int" "$latency" "$risk" "$detail"
   done
   wait
 
