@@ -359,8 +359,11 @@ _cmd_demo_inner() {
   local INFRA_ACTIONS=("aws.ec2.run" "aws.s3.put" "aws.lambda.invoke" "aws.rds.query")
   local COMMS_ACTIONS=("slack.post" "sendgrid.email" "twilio.sms")
   local DATA_ACTIONS=("postgres.query" "redis.set" "redis.get")
-  # Outcomes weighted heavily toward success so well-behaved agents earn good scores
-  local OUTCOMES=("success" "success" "success" "success" "success" "success" "success" "success" "partial" "failure")
+  # Outcome distribution is a probability roll on each report.
+  # Tune these once; everything else stays clean.
+  local OUTCOME_SUCCESS_PCT=85   # 0-84  → success
+  local OUTCOME_PARTIAL_PCT=10   # 85-94 → partial
+  # remainder                    # 95-99 → failure
 
   local start_s end_s
   start_s=$(date +%s)
@@ -406,9 +409,17 @@ _cmd_demo_inner() {
     case "$status" in
       allowed)
         allowed=$((allowed + 1))
-        local outcome="${OUTCOMES[$((RANDOM % ${#OUTCOMES[@]}))]}"
+        local roll=$((RANDOM % 100))
+        local outcome
+        if [ "$roll" -lt "$OUTCOME_SUCCESS_PCT" ]; then
+          outcome="success"
+        elif [ "$roll" -lt "$((OUTCOME_SUCCESS_PCT + OUTCOME_PARTIAL_PCT))" ]; then
+          outcome="partial"
+        else
+          outcome="failure"
+        fi
         local ac=$cost
-        [ "$outcome" = "failure" ] && ac=$(awk "BEGIN{printf \"%.2f\",$cost*0.3}")
+        [ "$outcome" = "failure" ] && ac=$(awk "BEGIN{printf \"%.2f\",$cost*1.4}")
         [ -n "$txn_id" ] && curl -s -X POST "${BASE_URL}/report" \
           -H "Authorization: Bearer ${API_KEY}" \
           -H "Content-Type: application/json" \
