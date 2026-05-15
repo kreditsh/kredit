@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -318,27 +318,29 @@ _cmd_demo_inner() {
     fi
   }
 
-  local R_OPENAI='[{"name":"OpenAI cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":100,"hourly_rate_limit":120},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":200}]'
-  local R_CLAUDE='[{"name":"Claude cap","match":"anthropic.*","max_cost_per_txn":3,"daily_spend_limit":80,"hourly_rate_limit":120},{"name":"Default","match":"*","max_cost_per_txn":2}]'
-  local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":8,"daily_spend_limit":150,"hourly_rate_limit":200},{"name":"GitHub","match":"github.*","max_cost_per_txn":0.5,"hourly_rate_limit":200}]'
-  local R_RESEARCH='[{"name":"Search","match":"serp.*","max_cost_per_txn":2,"hourly_rate_limit":80},{"name":"Scrape","match":"browserless.*","max_cost_per_txn":5,"hourly_rate_limit":60},{"name":"Default","match":"*","max_cost_per_txn":5}]'
-  local R_TRAVEL='[{"name":"Flight cap","match":"flight.*","max_cost_per_txn":800,"daily_spend_limit":2000,"hourly_rate_limit":10},{"name":"Hotel cap","match":"hotel.*","max_cost_per_txn":400,"daily_spend_limit":1000,"hourly_rate_limit":10}]'
-  local R_PROC='[{"name":"Vendor cap","match":"vendor.*","max_cost_per_txn":1000,"daily_spend_limit":5000,"hourly_rate_limit":20},{"name":"Equip cap","match":"equipment.*","max_cost_per_txn":500,"daily_spend_limit":2000}]'
-  local R_CLOUD='[{"name":"AWS cap","match":"aws.*","max_cost_per_txn":50,"daily_spend_limit":500,"hourly_rate_limit":120}]'
-  local R_COMMS='[{"name":"Slack","match":"slack.*","max_cost_per_txn":0.5,"hourly_rate_limit":120},{"name":"Email","match":"sendgrid.*","max_cost_per_txn":1,"hourly_rate_limit":60},{"name":"SMS","match":"twilio.*","max_cost_per_txn":0.5,"hourly_rate_limit":30}]'
-  local R_DATA='[{"name":"Postgres","match":"postgres.*","max_cost_per_txn":0.5,"hourly_rate_limit":300},{"name":"Redis","match":"redis.*","max_cost_per_txn":0.01,"hourly_rate_limit":600}]'
+  # Rule profiles tuned so well-behaved agents pass through cleanly.
+  # rogue-spender is the only one designed to consistently violate.
+  local R_OPENAI='[{"name":"OpenAI cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":2000}]'
+  local R_CLAUDE='[{"name":"Claude cap","match":"anthropic.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":5,"daily_spend_limit":1000}]'
+  local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":10,"daily_spend_limit":1500},{"name":"GitHub","match":"github.*","max_cost_per_txn":1,"daily_spend_limit":500}]'
+  local R_RESEARCH='[{"name":"Search","match":"serp.*","max_cost_per_txn":3,"daily_spend_limit":500},{"name":"Scrape","match":"browserless.*","max_cost_per_txn":8,"daily_spend_limit":500},{"name":"Default","match":"*","max_cost_per_txn":5,"daily_spend_limit":500}]'
+  local R_TRAVEL='[{"name":"Flight cap","match":"flight.*","max_cost_per_txn":800,"daily_spend_limit":15000},{"name":"Hotel cap","match":"hotel.*","max_cost_per_txn":400,"daily_spend_limit":8000}]'
+  local R_PROC='[{"name":"Vendor cap","match":"vendor.*","max_cost_per_txn":1000,"daily_spend_limit":15000},{"name":"Equip cap","match":"equipment.*","max_cost_per_txn":500,"daily_spend_limit":8000}]'
+  local R_CLOUD='[{"name":"AWS cap","match":"aws.*","max_cost_per_txn":50,"daily_spend_limit":2000}]'
+  local R_COMMS='[{"name":"Slack","match":"slack.*","max_cost_per_txn":0.5,"daily_spend_limit":200},{"name":"Email","match":"sendgrid.*","max_cost_per_txn":1,"daily_spend_limit":200},{"name":"SMS","match":"twilio.*","max_cost_per_txn":0.5,"daily_spend_limit":100}]'
+  local R_DATA='[{"name":"Postgres","match":"postgres.*","max_cost_per_txn":0.5,"daily_spend_limit":100},{"name":"Redis","match":"redis.*","max_cost_per_txn":0.05,"daily_spend_limit":20}]'
   local R_ROGUE='[{"name":"Tight cap","match":"*","max_cost_per_txn":15,"daily_spend_limit":100}]'
 
-  _mk_agent "gpt-writer"      "critical" 500  500  5    100  "$R_OPENAI"
-  _mk_agent "claude-agent"    "high"     400  400  3    80   "$R_CLAUDE"
-  _mk_agent "code-assistant"  "high"     250  250  8    150  "$R_CODE"
-  _mk_agent "research-bot"    "normal"   300  300  5    100  "$R_RESEARCH"
-  _mk_agent "travel-agent"    "high"     5000 5000 800  2000 "$R_TRAVEL"
-  _mk_agent "procurement-bot" "normal"   2000 2000 1000 5000 "$R_PROC"
-  _mk_agent "cloud-deployer"  "high"     400  400  50   500  "$R_CLOUD"
-  _mk_agent "comms-bot"       "normal"   100  100  1    50   "$R_COMMS"
-  _mk_agent "data-agent"      "normal"   150  150  1    50   "$R_DATA"
-  _mk_agent "rogue-spender"   "normal"   300  300  15   100  "$R_ROGUE"
+  _mk_agent "gpt-writer"      "critical" 5000 5000 5    1000 "$R_OPENAI"
+  _mk_agent "claude-agent"    "high"     5000 5000 5    1000 "$R_CLAUDE"
+  _mk_agent "code-assistant"  "high"     5000 5000 10   1500 "$R_CODE"
+  _mk_agent "research-bot"    "normal"   3000 3000 8    500  "$R_RESEARCH"
+  _mk_agent "travel-agent"    "high"    30000 30000 800 15000 "$R_TRAVEL"
+  _mk_agent "procurement-bot" "normal"  20000 20000 1000 15000 "$R_PROC"
+  _mk_agent "cloud-deployer"  "high"     5000 5000 50   2000 "$R_CLOUD"
+  _mk_agent "comms-bot"       "normal"   1000 1000 1    200  "$R_COMMS"
+  _mk_agent "data-agent"      "normal"   1000 1000 0.5  100  "$R_DATA"
+  _mk_agent "rogue-spender"   "normal"   500  500  15   100  "$R_ROGUE"
 
   local total=${#agents[@]}
   echo ""
@@ -357,7 +359,8 @@ _cmd_demo_inner() {
   local INFRA_ACTIONS=("aws.ec2.run" "aws.s3.put" "aws.lambda.invoke" "aws.rds.query")
   local COMMS_ACTIONS=("slack.post" "sendgrid.email" "twilio.sms")
   local DATA_ACTIONS=("postgres.query" "redis.set" "redis.get")
-  local OUTCOMES=("success" "success" "success" "success" "failure" "partial")
+  # Outcomes weighted heavily toward success so well-behaved agents earn good scores
+  local OUTCOMES=("success" "success" "success" "success" "success" "success" "success" "success" "partial" "failure")
 
   local start_s end_s
   start_s=$(date +%s)
@@ -368,16 +371,21 @@ _cmd_demo_inner() {
     local idx=$((RANDOM % total))
     local aid="${agents[$idx]}" aname="${names[$idx]}"
 
+    # Cost ranges tuned to mostly fit within each agent's max_cost_per_txn rule.
+    # rogue-spender deliberately exceeds its $15 cap to trigger blocks.
     local action cost
     case "$aname" in
-      travel-agent)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%50000)+1000)/100.0}");;
-      procurement-bot) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%30000)+500)/100.0}");;
-      cloud-deployer)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%6000)+100)/100.0}");;
-      comms-bot)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%100)+1)/100.0}");;
-      data-agent)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%50)+1)/100.0}");;
-      rogue-spender)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+500)/100.0}");;
-      claude-agent)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
-      *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%1000)+10)/100.0}");;
+      gpt-writer)      action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      claude-agent)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      code-assistant)  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
+      research-bot)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
+      travel-agent)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
+      procurement-bot) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
+      cloud-deployer)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%4500)+100)/100.0}");;
+      comms-bot)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40)+1)/100.0}");;
+      data-agent)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35)+1)/100.0}");;
+      rogue-spender)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+2000)/100.0}");;
+      *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
     esac
 
     local result status txn_id risk reason
