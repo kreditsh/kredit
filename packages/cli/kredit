@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.4"
+VERSION="0.3.5"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -403,19 +403,25 @@ _cmd_demo_inner() {
       *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
     esac
 
-    local result status txn_id risk reason
-    result=$(curl -s -X POST "${BASE_URL}/check" \
-      -H "Authorization: Bearer ${API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
-
-    status=$(printf "%s" "$result" | jq -r '.status // "error"' 2>/dev/null)
-    [ -z "$status" ] && status="error"
+    local result status txn_id risk reason _try
+    # Retry up to 3× so transient connection drops don't show as "error"
+    status="error"
+    _try=0
+    while [ "$status" = "error" ] && [ "$_try" -lt 3 ]; do
+      result=$(curl -s --max-time 5 -X POST "${BASE_URL}/check" \
+        -H "Authorization: Bearer ${API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"agent_id\":\"$aid\",\"action\":\"$action\",\"estimated_cost\":$cost}" 2>/dev/null)
+      status=$(printf "%s" "$result" | jq -r '.status // ""' 2>/dev/null)
+      case "$status" in allowed|blocked|flagged) ;; *) status="error" ;; esac
+      _try=$((_try + 1))
+    done
     txn_id=$(printf "%s" "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
     risk=$(printf "%s" "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
     [ -z "$risk" ] && risk="-"
     reason=$(printf "%s" "$result" | jq -r '.block_reason // ""' 2>/dev/null)
 
+    [ "$status" = "error" ] && continue   # skip silently after 3 retries
     tx=$((tx + 1))
 
     case "$status" in
@@ -435,12 +441,10 @@ _cmd_demo_inner() {
         fi
         # Actual cost varies ±20% from estimate — independent of outcome
         local ac=$(awk -v c="$cost" -v r="$RANDOM" 'BEGIN{printf "%.2f", c*(0.8+(r%41)/100.0)}')
-        [ -n "$txn_id" ] && curl -s -X POST "${BASE_URL}/report" \
+        [ -n "$txn_id" ] && curl -s --max-time 3 -X POST "${BASE_URL}/report" \
           -H "Authorization: Bearer ${API_KEY}" \
           -H "Content-Type: application/json" \
-          -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1 &
-        # Drain background report jobs every 25 transactions to prevent fd exhaustion
-        [ $((tx % 25)) -eq 0 ] && wait
+          -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1
         ;;
       blocked) blocked=$((blocked + 1)) ;;
       flagged) flagged=$((flagged + 1)) ;;
