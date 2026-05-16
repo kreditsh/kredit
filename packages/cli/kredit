@@ -449,7 +449,8 @@ _cmd_demo_inner() {
     esac
 
     printf "  #%-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
-      "$txnum" "$aname" "$action" "$cost" "$status" "$risk" "$reason"
+      "$txnum" "$aname" "$action" "$cost" "$status" "$risk" "$reason" \
+      > "${DEMO_TMP}/out_$(printf '%06d' "$txnum")"
   }
 
   local target=1000
@@ -488,6 +489,9 @@ _cmd_demo_inner() {
     _txn_job "$aid" "$aname" "$action" "$cost" "$dispatched" &
   done
   wait
+
+  # Print all results in TX# order
+  for f in $(ls "${DEMO_TMP}"/out_* 2>/dev/null | sort); do cat "$f"; done
 
   local tx allowed blocked flagged
   allowed=$(ls "${DEMO_TMP}"/a_* 2>/dev/null | wc -l | tr -d ' ')
