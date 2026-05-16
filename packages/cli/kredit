@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.6"
+VERSION="0.3.7"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -347,8 +347,8 @@ _cmd_demo_inner() {
   echo "      Created $total agents"
   echo ""
 
-  # ── Phase 3: Run 1000-transaction burst ──────────────────────────────────
-  echo "[3/3] Running 1000 transactions..."
+  # ── Phase 3: Run up to 1000 transactions or 60 seconds ───────────────────
+  echo "[3/3] Running up to 1000 tx / 60s..."
   echo ""
   printf "  %-6s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TX#" "AGENT" "ACTION" "COST" "STATUS" "RISK" "DETAIL"
   echo "  ──────────────────────────────────────────────────────────────────────────────────────"
@@ -378,11 +378,12 @@ _cmd_demo_inner() {
   }
 
   local target=1000
-  local start_s
+  local start_s end_s
   start_s=$(date +%s)
+  end_s=$((start_s + 60))
   local tx=0 allowed=0 blocked=0 flagged=0 rogue_reports=0
 
-  while [ "$tx" -lt "$target" ]; do
+  while [ "$tx" -lt "$target" ] && [ "$(date +%s)" -lt "$end_s" ]; do
     local idx=$((RANDOM % total))
     local aid="${agents[$idx]}" aname="${names[$idx]}"
 
