@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.7"
+VERSION="0.3.8"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -322,7 +322,7 @@ _cmd_demo_inner() {
   # ad-bid-optimizer is the only one designed to consistently violate.
   local R_OPENAI='[{"name":"OpenAI cap","match":"openai.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":10,"daily_spend_limit":2000}]'
   local R_CLAUDE='[{"name":"Claude cap","match":"anthropic.*","max_cost_per_txn":5,"daily_spend_limit":1000},{"name":"Default","match":"*","max_cost_per_txn":5,"daily_spend_limit":1000}]'
-  local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":10,"daily_spend_limit":1500},{"name":"GitHub","match":"github.*","max_cost_per_txn":1,"daily_spend_limit":500}]'
+  local R_CODE='[{"name":"Code APIs","match":"openai.*","max_cost_per_txn":10,"daily_spend_limit":1500},{"name":"GitHub","match":"github.*","hourly_rate_limit":30}]'
   local R_RESEARCH='[{"name":"Search","match":"serp.*","max_cost_per_txn":3,"daily_spend_limit":500},{"name":"Scrape","match":"browserless.*","max_cost_per_txn":8,"daily_spend_limit":500},{"name":"Default","match":"*","max_cost_per_txn":5,"daily_spend_limit":500}]'
   local R_TRAVEL='[{"name":"Flight cap","match":"flight.*","max_cost_per_txn":800,"daily_spend_limit":15000},{"name":"Hotel cap","match":"hotel.*","max_cost_per_txn":400,"daily_spend_limit":8000}]'
   local R_PROC='[{"name":"Vendor cap","match":"vendor.*","max_cost_per_txn":1000,"daily_spend_limit":15000},{"name":"Equip cap","match":"equipment.*","max_cost_per_txn":500,"daily_spend_limit":8000}]'
@@ -391,7 +391,12 @@ _cmd_demo_inner() {
     case "$aname" in
       content-pipeline)   action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
       support-tier-1)     action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
-      code-review-bot)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
+      code-review-bot)
+        action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}"
+        case "$action" in
+          github.*) cost="0.00" ;;
+          *)        cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}") ;;
+        esac ;;
       market-intel)       action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
       booking-ops)        action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
       vendor-payments)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
