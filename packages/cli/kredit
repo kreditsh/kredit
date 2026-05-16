@@ -350,8 +350,8 @@ _cmd_demo_inner() {
   # ── Phase 3: Run up to 1000 transactions or 60 seconds (async) ───────────
   echo "[3/3] Running up to 1000 tx / 60s (async)..."
   echo ""
-  printf "  %-5s %-18s %-22s %10s   %-8s  %-6s  %s\n" "#" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
-  echo "  ──────────────────────────────────────────────────────────────────────────────────────"
+  printf "  %-26s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TXN_ID" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
+  echo "  ───────────────────────────────────────────────────────────────────────────────────────────"
 
   local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
   local SPEND_ACTIONS=("flight.booking" "hotel.booking" "vendor.payout" "equipment.purchase" "software.license" "catering.order")
@@ -448,12 +448,8 @@ _cmd_demo_inner() {
         ;;
     esac
 
-    local row
-    row=$(cat "${DEMO_TMP}/row" 2>/dev/null || echo 0)
-    row=$((row + 1))
-    echo "$row" > "${DEMO_TMP}/row"
-    printf "  %-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
-      "$row" "$aname" "$action" "$cost" "$status" "$risk" "$reason"
+    printf "  %-26s %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
+      "$txn_id" "$aname" "$action" "$cost" "$status" "$risk" "$reason"
   }
 
   local target=1000
@@ -461,7 +457,6 @@ _cmd_demo_inner() {
   start_s=$(date +%s)
   end_s=$((start_s + 60))
   local dispatched=0
-  echo "0" > "${DEMO_TMP}/row"
 
   while [ "$dispatched" -lt "$target" ] && [ "$(date +%s)" -lt "$end_s" ]; do
     while [ "$(jobs -rp | wc -l)" -ge 30 ]; do sleep 0.01; done
