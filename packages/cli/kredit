@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.10"
+VERSION="0.3.11"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -350,8 +350,8 @@ _cmd_demo_inner() {
   # ── Phase 3: Run up to 1000 transactions or 60 seconds (async) ───────────
   echo "[3/3] Running up to 1000 tx / 60s (async)..."
   echo ""
-  printf "  %-18s %-22s %10s   %-8s  %-6s  %s\n" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
-  echo "  ────────────────────────────────────────────────────────────────────────────────"
+  printf "  %-6s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TX#" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
+  echo "  ──────────────────────────────────────────────────────────────────────────────────────"
 
   local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
   local SPEND_ACTIONS=("flight.booking" "hotel.booking" "vendor.payout" "equipment.purchase" "software.license" "catering.order")
@@ -379,7 +379,7 @@ _cmd_demo_inner() {
 
   # Each transaction runs as an independent background job: check + report in one shot
   _txn_job() {
-    local aid="$1" aname="$2" action="$3" cost="$4"
+    local aid="$1" aname="$2" action="$3" cost="$4" txnum="$5"
 
     local result status txn_id risk reason _try
     status="error"
@@ -448,8 +448,8 @@ _cmd_demo_inner() {
         ;;
     esac
 
-    printf "  %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
-      "$aname" "$action" "$cost" "$status" "$risk" "$reason"
+    printf "  #%-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
+      "$txnum" "$aname" "$action" "$cost" "$status" "$risk" "$reason"
   }
 
   local target=1000
@@ -484,8 +484,8 @@ _cmd_demo_inner() {
       *)                  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}") ;;
     esac
 
-    _txn_job "$aid" "$aname" "$action" "$cost" &
     dispatched=$((dispatched + 1))
+    _txn_job "$aid" "$aname" "$action" "$cost" "$dispatched" &
   done
   wait
 
