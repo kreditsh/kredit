@@ -350,7 +350,7 @@ _cmd_demo_inner() {
   # ── Phase 3: Run up to 1000 transactions or 60 seconds (async) ───────────
   echo "[3/3] Running up to 1000 tx / 60s (async)..."
   echo ""
-  printf "  %-6s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TX#" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
+  printf "  %-5s %-18s %-22s %10s   %-8s  %-6s  %s\n" "#" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
   echo "  ──────────────────────────────────────────────────────────────────────────────────────"
 
   local API_ACTIONS=("openai.chat" "openai.embeddings" "openai.image" "openai.tts" "anthropic.messages" "serp.search" "browserless.scrape" "github.api" "github.gist" "datadog.metric")
@@ -393,10 +393,7 @@ _cmd_demo_inner() {
       case "$status" in allowed|blocked|flagged) ;; *) status="error" ;; esac
       _try=$((_try + 1))
     done
-    if [ "$status" = "error" ]; then
-      touch "${DEMO_TMP}/out_$(printf '%06d' "$txnum")" 2>/dev/null
-      return
-    fi
+    [ "$status" = "error" ] && return
 
     txn_id=$(printf "%s" "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
     risk=$(printf "%s" "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
@@ -451,9 +448,12 @@ _cmd_demo_inner() {
         ;;
     esac
 
-    printf "  #%-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
-      "$txnum" "$aname" "$action" "$cost" "$status" "$risk" "$reason" \
-      > "${DEMO_TMP}/out_$(printf '%06d' "$txnum")"
+    local row
+    row=$(cat "${DEMO_TMP}/row" 2>/dev/null || echo 0)
+    row=$((row + 1))
+    echo "$row" > "${DEMO_TMP}/row"
+    printf "  %-5d %-18s %-22s \$%9s   %-8s  %-6s  %s\n" \
+      "$row" "$aname" "$action" "$cost" "$status" "$risk" "$reason"
   }
 
   local target=1000
@@ -461,6 +461,7 @@ _cmd_demo_inner() {
   start_s=$(date +%s)
   end_s=$((start_s + 60))
   local dispatched=0
+  echo "0" > "${DEMO_TMP}/row"
 
   while [ "$dispatched" -lt "$target" ] && [ "$(date +%s)" -lt "$end_s" ]; do
     while [ "$(jobs -rp | wc -l)" -ge 30 ]; do sleep 0.01; done
@@ -493,13 +494,6 @@ _cmd_demo_inner() {
   done
   wait
 
-  # Print all results in TX# order
-  local n=1
-  while [ "$n" -le "$dispatched" ]; do
-    local f="${DEMO_TMP}/out_$(printf '%06d' "$n")"
-    [ -f "$f" ] && cat "$f"
-    n=$((n + 1))
-  done
 
   local tx allowed blocked flagged
   allowed=$(ls "${DEMO_TMP}"/a_* 2>/dev/null | wc -l | tr -d ' ')
