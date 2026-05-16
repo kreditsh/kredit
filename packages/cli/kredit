@@ -393,7 +393,10 @@ _cmd_demo_inner() {
       case "$status" in allowed|blocked|flagged) ;; *) status="error" ;; esac
       _try=$((_try + 1))
     done
-    [ "$status" = "error" ] && return
+    if [ "$status" = "error" ]; then
+      touch "${DEMO_TMP}/out_$(printf '%06d' "$txnum")" 2>/dev/null
+      return
+    fi
 
     txn_id=$(printf "%s" "$result" | jq -r '.transaction_id // empty' 2>/dev/null)
     risk=$(printf "%s" "$result"   | jq -r '.risk_level // "-"' 2>/dev/null)
@@ -491,7 +494,12 @@ _cmd_demo_inner() {
   wait
 
   # Print all results in TX# order
-  for f in $(ls "${DEMO_TMP}"/out_* 2>/dev/null | sort); do cat "$f"; done
+  local n=1
+  while [ "$n" -le "$dispatched" ]; do
+    local f="${DEMO_TMP}/out_$(printf '%06d' "$n")"
+    [ -f "$f" ] && cat "$f"
+    n=$((n + 1))
+  done
 
   local tx allowed blocked flagged
   allowed=$(ls "${DEMO_TMP}"/a_* 2>/dev/null | wc -l | tr -d ' ')
