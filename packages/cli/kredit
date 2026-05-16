@@ -310,7 +310,7 @@ _cmd_demo_inner() {
       local score
       score=$(echo "$resp" | jq -r '.credit.score // 600')
       init_scores+=("$score")
-      printf "      ✓ %-18s priority=%-8s balance=\$%-5d budget=\$%-5d max=\$%-4d daily=\$%-5d  id=%s\n" \
+      printf "      ✓ %-18s priority=%-8s balance=\$%-5d budget=\$%-5d max=\$%-5g daily=\$%-5d  id=%s\n" \
         "$name" "$priority" "$balance" "$budget" "$max_txn" "$daily" "$id"
       echo "$resp" | jq -r '.rules[] | "          rule: \(.name) [match=\(.match)]" + (if .max_cost_per_txn > 0 then "  max_cost=$\(.max_cost_per_txn)" else "" end) + (if .daily_spend_limit > 0 then "  daily=$\(.daily_spend_limit)" else "" end) + (if .hourly_rate_limit > 0 then "  rate=\(.hourly_rate_limit)/hr" else "" end)'
     else
@@ -439,6 +439,8 @@ _cmd_demo_inner() {
           -H "Authorization: Bearer ${API_KEY}" \
           -H "Content-Type: application/json" \
           -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1 &
+        # Drain background report jobs every 25 transactions to prevent fd exhaustion
+        [ $((tx % 25)) -eq 0 ] && wait
         ;;
       blocked) blocked=$((blocked + 1)) ;;
       flagged) flagged=$((flagged + 1)) ;;
