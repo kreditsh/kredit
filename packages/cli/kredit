@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.5"
+VERSION="0.3.6"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -295,9 +295,9 @@ _cmd_demo_inner() {
   local agents=() names=() init_scores=()
 
   _mk_agent() {
-    local name="$1" priority="$2" balance="$3" budget="$4" max_txn="$5" daily="$6" rules="$7"
+    local name="$1" priority="$2" balance="$3" budget="$4" max_txn="$5" daily="$6" rules="$7" backdate="${8:-0}"
     local wallet="{\"balance\":$balance,\"budget\":$budget,\"max_per_txn\":$max_txn,\"daily_spend_limit\":$daily}"
-    local body="{\"org_name\":\"$org_name\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules}"
+    local body="{\"org_name\":\"$org_name\",\"name\":\"$name\",\"priority\":\"$priority\",\"wallet\":$wallet,\"rules\":$rules,\"backdate_days\":$backdate}"
     local resp id
     resp=$(curl -s -X POST "${BASE_URL}/agents" \
       -H "Authorization: Bearer ${API_KEY}" \
@@ -331,15 +331,15 @@ _cmd_demo_inner() {
   local R_DATA='[{"name":"Postgres","match":"postgres.*","max_cost_per_txn":0.5,"daily_spend_limit":100},{"name":"Redis","match":"redis.*","max_cost_per_txn":0.05,"daily_spend_limit":20}]'
   local R_ROGUE='[{"name":"Tight cap","match":"*","max_cost_per_txn":15,"daily_spend_limit":100}]'
 
-  _mk_agent "content-pipeline"      "critical" 5000 5000 5    1000 "$R_OPENAI"
-  _mk_agent "support-tier-1"    "high"     5000 5000 5    1000 "$R_CLAUDE"
-  _mk_agent "code-review-bot"  "high"     5000 5000 10   1500 "$R_CODE"
-  _mk_agent "market-intel"    "normal"   3000 3000 8    500  "$R_RESEARCH"
-  _mk_agent "booking-ops"    "high"    30000 30000 800 15000 "$R_TRAVEL"
-  _mk_agent "vendor-payments" "normal"  20000 20000 1000 15000 "$R_PROC"
-  _mk_agent "infra-deploy"  "high"     5000 5000 50   2000 "$R_CLOUD"
-  _mk_agent "notifications"       "normal"   1000 1000 1    200  "$R_COMMS"
-  _mk_agent "data-sync"      "normal"   1000 1000 0.5  100  "$R_DATA"
+  _mk_agent "content-pipeline"   "critical" 5000 5000 5    1000 "$R_OPENAI"  120
+  _mk_agent "support-tier-1"     "high"     5000 5000 5    1000 "$R_CLAUDE"  120
+  _mk_agent "code-review-bot"    "high"     5000 5000 10   1500 "$R_CODE"    120
+  _mk_agent "market-intel"       "normal"   3000 3000 8    500  "$R_RESEARCH"
+  _mk_agent "booking-ops"        "high"    30000 30000 800 15000 "$R_TRAVEL"  120
+  _mk_agent "vendor-payments"    "normal"  20000 20000 1000 15000 "$R_PROC"
+  _mk_agent "infra-deploy"       "high"     5000 5000 50   2000 "$R_CLOUD"   120
+  _mk_agent "notifications"      "normal"   1000 1000 1    200  "$R_COMMS"
+  _mk_agent "data-sync"          "normal"   1000 1000 0.5  100  "$R_DATA"
   _mk_agent "ad-bid-optimizer"   "normal"   500  500  15   100  "$R_ROGUE"
 
   local total=${#agents[@]}
@@ -347,8 +347,8 @@ _cmd_demo_inner() {
   echo "      Created $total agents"
   echo ""
 
-  # ── Phase 3: Run 60-second transaction burst ─────────────────────────────
-  echo "[3/3] Running 60s of transactions..."
+  # ── Phase 3: Run 1000-transaction burst ──────────────────────────────────
+  echo "[3/3] Running 1000 transactions..."
   echo ""
   printf "  %-6s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TX#" "AGENT" "ACTION" "COST" "STATUS" "RISK" "DETAIL"
   echo "  ──────────────────────────────────────────────────────────────────────────────────────"
@@ -365,46 +365,43 @@ _cmd_demo_inner() {
   _outcome_pcts() {
     case "$1" in
       content-pipeline|support-tier-1|code-review-bot|booking-ops|infra-deploy)
-        echo "92 6" ;;   # well-behaved → score ~780-820
+        echo "100 0" ;;  # elite → score ~850
       data-sync|vendor-payments)
         echo "82 12" ;;  # reliable → score ~700-760
       market-intel|notifications)
-        echo "60 25" ;;  # messy → score ~500-600 (throttled)
+        echo "60 25" ;;  # messy → score ~600-700
       ad-bid-optimizer)
-        echo "35 25" ;;  # bad actor → score ~350-450 (throttled/frozen)
+        echo "0 0" ;;   # bad actor → 100% failure → score ~350
       *)
         echo "80 15" ;;
     esac
   }
 
-  local start_s end_s
+  local target=1000
+  local start_s
   start_s=$(date +%s)
-  end_s=$((start_s + 60))
-  local tx=0 allowed=0 blocked=0 flagged=0
+  local tx=0 allowed=0 blocked=0 flagged=0 rogue_reports=0
 
-  while [ "$(date +%s)" -lt "$end_s" ]; do
+  while [ "$tx" -lt "$target" ]; do
     local idx=$((RANDOM % total))
     local aid="${agents[$idx]}" aname="${names[$idx]}"
 
-    # Cost ranges tuned to mostly fit within each agent's max_cost_per_txn rule.
-    # ad-bid-optimizer deliberately exceeds its $15 cap to trigger blocks.
     local action cost
     case "$aname" in
-      content-pipeline)      action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
-      support-tier-1)    action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
-      code-review-bot)  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
-      market-intel)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
-      booking-ops)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
-      vendor-payments) action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
-      infra-deploy)  action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%4500)+100)/100.0}");;
-      notifications)       action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40)+1)/100.0}");;
-      data-sync)      action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35)+1)/100.0}");;
+      content-pipeline)   action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      support-tier-1)     action="anthropic.messages";                                    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%450)+10)/100.0}");;
+      code-review-bot)    action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%900)+10)/100.0}");;
+      market-intel)       action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%280)+10)/100.0}");;
+      booking-ops)        action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35000)+1000)/100.0}");;
+      vendor-payments)    action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40000)+1000)/100.0}");;
+      infra-deploy)       action="${INFRA_ACTIONS[$((RANDOM % ${#INFRA_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%4500)+100)/100.0}");;
+      notifications)      action="${COMMS_ACTIONS[$((RANDOM % ${#COMMS_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%40)+1)/100.0}");;
+      data-sync)          action="${DATA_ACTIONS[$((RANDOM % ${#DATA_ACTIONS[@]}))]}";    cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%35)+1)/100.0}");;
       ad-bid-optimizer)   action="${SPEND_ACTIONS[$((RANDOM % ${#SPEND_ACTIONS[@]}))]}";  cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%9000)+2000)/100.0}");;
-      *)               action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
+      *)                  action="${API_ACTIONS[$((RANDOM % ${#API_ACTIONS[@]}))]}";      cost=$(awk "BEGIN{printf \"%.2f\",(($RANDOM%500)+10)/100.0}");;
     esac
 
     local result status txn_id risk reason _try
-    # Retry up to 3× so transient connection drops don't show as "error"
     status="error"
     _try=0
     while [ "$status" = "error" ] && [ "$_try" -lt 3 ]; do
@@ -439,14 +436,36 @@ _cmd_demo_inner() {
         else
           outcome="failure"
         fi
-        # Actual cost varies ±20% from estimate — independent of outcome
-        local ac=$(awk -v c="$cost" -v r="$RANDOM" 'BEGIN{printf "%.2f", c*(0.8+(r%41)/100.0)}')
-        [ -n "$txn_id" ] && curl -s --max-time 3 -X POST "${BASE_URL}/report" \
-          -H "Authorization: Bearer ${API_KEY}" \
-          -H "Content-Type: application/json" \
-          -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1
+        # Elite agents come in under budget (good efficiency), others vary ±20%
+        local ac
+        case "$aname" in
+          content-pipeline|support-tier-1|code-review-bot|booking-ops|infra-deploy)
+            ac=$(awk -v c="$cost" -v r="$RANDOM" 'BEGIN{printf "%.2f", c*(0.65+(r%16)/100.0)}') ;;
+          *)
+            ac=$(awk -v c="$cost" -v r="$RANDOM" 'BEGIN{printf "%.2f", c*(0.8+(r%41)/100.0)}') ;;
+        esac
+        if [ -n "$txn_id" ]; then
+          while [ "$(jobs -rp | wc -l)" -ge 10 ]; do sleep 0.05; done
+          curl -s --max-time 8 -X POST "${BASE_URL}/report" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"$outcome\",\"actual_cost\":$ac}" > /dev/null 2>&1 &
+        fi
         ;;
-      blocked) blocked=$((blocked + 1)) ;;
+      blocked)
+        blocked=$((blocked + 1))
+        # Ad-bid-optimizer: send a capped number of failure reports to drive score ~350
+        if [ "$aname" = "ad-bid-optimizer" ] && [ -n "$txn_id" ] && [ "$rogue_reports" -lt 15 ]; then
+          rogue_reports=$((rogue_reports + 1))
+          local rogue_ac
+          rogue_ac=$(awk -v c="$cost" 'BEGIN{printf "%.2f", c*15}')
+          while [ "$(jobs -rp | wc -l)" -ge 10 ]; do sleep 0.05; done
+          curl -s --max-time 8 -X POST "${BASE_URL}/report" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"transaction_id\":\"$txn_id\",\"outcome\":\"failure\",\"actual_cost\":$rogue_ac}" > /dev/null 2>&1 &
+        fi
+        ;;
       flagged) flagged=$((flagged + 1)) ;;
     esac
 
