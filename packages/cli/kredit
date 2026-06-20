@@ -267,10 +267,22 @@ _cmd_demo_inner() {
   set +o pipefail
 
   echo ""
-  echo "  ╔═══════════════════════════════════════════════════════╗"
-  echo "  ║         Kredit 60-Second Demo Simulation              ║"
-  echo "  ║         10 agents · many transactions · per-second    ║"
-  echo "  ╚═══════════════════════════════════════════════════════╝"
+  echo "  ██  ██ █████  ██████ █████  ██████ ██████"
+  echo "  ██ ██  ██  ██ ██     ██  ██   ██     ██   "
+  echo "  ████   █████  █████  ██  ██   ██     ██   "
+  echo "  ████   ████   █████  ██  ██   ██     ██   "
+  echo "  ██ ██  ██ ██  ██     ██  ██   ██     ██   "
+  echo "  ██  ██ ██  ██ ██████ █████  ██████   ██   "
+  echo ""
+  echo "  Trusted Autonomy for enterprise AI."
+  echo ""
+  echo "  Kredit is the pre-execution risk intelligence infrastructure"
+  echo "  that lets enterprises trust their agents. Proprietary risk models"
+  echo "  score every agent's intent before it acts — so safe actions move"
+  echo "  forward and the risky ones are blocked."
+  echo ""
+  echo "  This demo spins up 10 agents and runs a 60-second, per-second"
+  echo "  simulation of real-world API spend, payouts, and infra costs."
   echo ""
   echo "  Log file: $LOG_FILE"
   echo "  Dashboard: https://kredit.sh/dashboard/spend"
@@ -349,6 +361,17 @@ _cmd_demo_inner() {
 
   # ── Phase 3: Run up to 1000 transactions or 60 seconds (async) ───────────
   echo "[3/3] Running up to 1000 tx / 60s (async)..."
+  echo ""
+
+  # Transactions are about to start — pop open the live spend dashboard so
+  # the user can watch it fill up in real time.
+  local dashboard_url="https://kredit.sh/dashboard/spend"
+  echo "  Opening live dashboard: $dashboard_url"
+  if command -v open >/dev/null 2>&1; then
+    open "$dashboard_url" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$dashboard_url" >/dev/null 2>&1 &
+  fi
   echo ""
   printf "  %-26s %-18s %-22s %10s   %-8s  %-6s  %s\n" "TXN_ID" "AGENT" "API_CALL" "COST" "STATUS" "RISK" "DETAIL"
   echo "  ───────────────────────────────────────────────────────────────────────────────────────────"
