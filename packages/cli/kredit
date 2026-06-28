@@ -250,17 +250,17 @@ server.serve_forever()
   echo "You're ready to go. Try: kredit orgs create --name=my-team"
 }
 
-cmd_demo() {
+cmd_simulation() {
   require_api_key
 
   local home="${HOME:-$(eval echo ~)}"
   mkdir -p "$home/.kredit"
   local LOG_FILE="$home/.kredit/sim-$(date +%Y%m%d-%H%M%S).log"
-  _cmd_demo_inner 2>&1 | tee "$LOG_FILE"
+  _cmd_simulation_inner 2>&1 | tee "$LOG_FILE"
 }
 
-_cmd_demo_inner() {
-  # Relax strict mode inside the demo — individual curl/jq hiccups must
+_cmd_simulation_inner() {
+  # Relax strict mode inside the simulation — individual curl/jq hiccups must
   # not kill the simulation loop. We still log them in the output.
   set +e
   set +u
@@ -292,14 +292,14 @@ _cmd_demo_inner() {
   echo "  ║  Dashboard:  https://kredit.sh/dashboard/spend                          ║"
   echo "  ╚═════════════════════════════════════════════════════════════════════════╝"
   echo ""
-  echo "  This demo spins up 10 agents and runs a 60-second, per-second"
+  echo "  This simulation spins up 10 agents and runs a 60-second, per-second"
   echo "  simulation of real-world API spend, payouts, and infra costs."
   echo ""
   echo "  Log file: $LOG_FILE"
   echo ""
 
   # ── Phase 1: Create unique org ───────────────────────────────────────────
-  local org_name="kredit-demo-$(date +%Y%m%d-%H%M%S)"
+  local org_name="kredit-simulation-$(date +%Y%m%d-%H%M%S)"
   echo "[1/3] Creating org: $org_name"
   local org_response org_id
   org_response=$(curl -s -X POST "${BASE_URL}/orgs" \
@@ -821,7 +821,7 @@ Usage:
 Commands:
   login     Authenticate and create an API key
   logout    Remove saved API key
-  demo      Run a 1-hour simulation with sample agents
+  simulation  Run a 1-hour simulation with sample agents
   rules     Manage agent rules (list, add, remove)
   check     Run a risk check before executing an action
   report    Report the outcome of an action
@@ -859,7 +859,8 @@ main() {
   case "$cmd" in
     login)    cmd_login "$@" ;;
     logout)   cmd_logout "$@" ;;
-    demo)     cmd_demo "$@" ;;
+    simulation) cmd_simulation "$@" ;;
+    demo)     cmd_simulation "$@" ;;  # back-compat alias
     check)    cmd_check "$@" ;;
     report)   cmd_report "$@" ;;
     agents)   cmd_agents "$@" ;;

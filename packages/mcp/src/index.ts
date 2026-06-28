@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { KreditAPI } from "./api.js";
 import { resolveConfig } from "./config.js";
+import { runSimulation } from "./simulation.js";
 
 function tool(
 	server: McpServer,
@@ -274,6 +275,37 @@ function createServer(api: KreditAPI): McpServer {
 	// ── Fleet ──
 	tool(server, "kredit_fleet", "Get fleet overview stats", {}, () =>
 		api.fleetOverview(),
+	);
+
+	// ── Simulation ──
+	tool(
+		server,
+		"kredit_simulation",
+		"Run a Kredit simulation: stand up a throwaway org with a small agent fleet, fire a batch of risk checks across varied payment/api/tool actions, and return a summary of the allow/block/flag decisions. Creates real data — clean up with kredit_delete_org.",
+		{
+			org_name: z
+				.string()
+				.optional()
+				.describe(
+					"Org to create agents under (defaults to a unique 'simulation-…' org)",
+				),
+			agents: z
+				.number()
+				.int()
+				.optional()
+				.describe("Number of agents to spin up (1–10, default 4)"),
+			actions_per_agent: z
+				.number()
+				.int()
+				.optional()
+				.describe("Risk checks to run per agent (1–20, default 5)"),
+		},
+		({ org_name, agents, actions_per_agent }) =>
+			runSimulation(api, {
+				orgName: org_name,
+				agents,
+				actionsPerAgent: actions_per_agent,
+			}),
 	);
 
 	// ── Transactions ──

@@ -23,7 +23,7 @@ export KREDIT_API_KEY=kr_live_...
 claude mcp add kredit -- kredit-mcp serve
 ```
 
-## Tools (22 total)
+## Tools (23 total)
 
 ### Organizations
 | Tool | Description |
@@ -69,6 +69,11 @@ claude mcp add kredit -- kredit-mcp serve
 | `kredit_fleet` | Fleet overview stats |
 | `kredit_transactions` | List transactions (audit log) |
 | `kredit_events` | Agent state change history |
+
+### Simulation
+| Tool | Description |
+|------|-------------|
+| `kredit_simulation` | Spin up a throwaway org + fleet, fire a batch of risk checks, and return the allow/block/flag summary |
 
 ## Example
 
