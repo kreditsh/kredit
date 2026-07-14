@@ -3,6 +3,7 @@ import { z } from "zod";
 export const OrgSchema = z.object({
 	id: z.string(),
 	name: z.string(),
+	mode: z.string().default(""),
 	created_at: z.string().nullish(),
 });
 export type Org = z.infer<typeof OrgSchema>;
@@ -39,10 +40,13 @@ export type Credit = z.infer<typeof CreditSchema>;
 export const AgentSchema = z.object({
 	id: z.string(),
 	org_id: z.string(),
+	sandbox_id: z.string().nullish(),
 	name: z.string(),
 	status: z.string(),
+	mode: z.string().default(""),
 	priority: z.string().default("normal"),
 	wallet: WalletSchema,
+	budgets: z.record(z.string(), z.unknown()).nullish(),
 	credit: CreditSchema,
 	rules: z.array(RuleSchema).default([]),
 	created_at: z.string().nullish(),
@@ -73,6 +77,7 @@ export const TransactionSchema = z.object({
 	id: z.string(),
 	org_id: z.string(),
 	agent_id: z.string(),
+	mode: z.string().default(""),
 	type: z.string().default("api_call"),
 	action: z.string(),
 	status: z.string(),
@@ -139,3 +144,105 @@ export const EventSchema = z.object({
 	timestamp: z.string(),
 });
 export type Event = z.infer<typeof EventSchema>;
+
+export const GaussianSchema = z.object({
+	mean: z.number().default(0),
+	variance: z.number().default(0),
+});
+export type Gaussian = z.infer<typeof GaussianSchema>;
+
+export const SeasonalitySchema = z.object({
+	dow: z.array(z.number()).default([]), // Mon..Sun multipliers (7)
+	hour: z.array(z.number()).default([]), // 0..23 multipliers (24)
+});
+export type Seasonality = z.infer<typeof SeasonalitySchema>;
+
+export const WorkflowNodeSchema = z.object({
+	id: z.string(),
+	type: z.string(), // agent | llm | api | tool | payment
+	label: z.string().default(""),
+	integration: z.string().default(""),
+	config: z.record(z.string(), z.unknown()).default({}),
+});
+export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
+
+export const WorkflowEdgeSchema = z.object({
+	from: z.string(),
+	to: z.string(),
+	condition: z.string().nullish(),
+});
+export type WorkflowEdge = z.infer<typeof WorkflowEdgeSchema>;
+
+export const WorkflowSchema = z.object({
+	id: z.string(),
+	sandbox_id: z.string(),
+	mode: z.string().default(""),
+	name: z.string().default(""),
+	nodes: z.array(WorkflowNodeSchema).default([]),
+	edges: z.array(WorkflowEdgeSchema).default([]),
+	version: z.number().int().default(1),
+	created_at: z.string().nullish(),
+	updated_at: z.string().nullish(),
+});
+export type Workflow = z.infer<typeof WorkflowSchema>;
+
+export const EnvironmentSchema = z.object({
+	id: z.string(),
+	sandbox_id: z.string(),
+	user_id: z.string().default(""),
+	kind: z.string(), // simulation | development | preview | production | simulation-run
+	name: z.string().default(""),
+	simulation_id: z.string().nullish(),
+	parent_environment_id: z.string().nullish(),
+	active: z.boolean().default(true),
+	created_at: z.string().nullish(),
+	updated_at: z.string().nullish(),
+});
+export type Environment = z.infer<typeof EnvironmentSchema>;
+
+export const ChatComponentSchema = z.object({
+	type: z.string(),
+	ref_id: z.string().nullish(),
+	title: z.string().default(""),
+	data: z.record(z.string(), z.unknown()).nullish(),
+});
+export type ChatComponent = z.infer<typeof ChatComponentSchema>;
+
+export const MessageSchema = z.object({
+	id: z.string(),
+	chat_id: z.string(),
+	role: z.string(),
+	content: z.string().default(""),
+	tool_calls: z.array(z.record(z.string(), z.unknown())).default([]),
+	components: z.array(ChatComponentSchema).default([]),
+	created_at: z.string().nullish(),
+});
+export type Message = z.infer<typeof MessageSchema>;
+
+export const ChatSchema = z.object({
+	id: z.string(),
+	sandbox_id: z.string().nullish(),
+	mode: z.string().default(""),
+	simulation_id: z.string().nullish(),
+	title: z.string().default(""),
+	messages: z.array(MessageSchema).default([]),
+	created_at: z.string().nullish(),
+	updated_at: z.string().nullish(),
+});
+export type Chat = z.infer<typeof ChatSchema>;
+
+export const PriorSchema = z.object({
+	id: z.string(),
+	sandbox_id: z.string(),
+	mode: z.string().default(""),
+	name: z.string().default(""),
+	workflow_id: z.string().default(""),
+	frequency: GaussianSchema,
+	cost: GaussianSchema,
+	transitions: z.record(z.string(), z.number()).default({}),
+	seasonality: SeasonalitySchema,
+	source: z.string().default("manual"),
+	created_at: z.string().nullish(),
+	updated_at: z.string().nullish(),
+});
+export type Prior = z.infer<typeof PriorSchema>;

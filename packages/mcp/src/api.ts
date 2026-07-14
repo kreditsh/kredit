@@ -39,11 +39,19 @@ export class KreditAPI {
 	}
 
 	// Orgs
-	listOrgs() {
-		return this.request("GET", "/orgs");
+	listOrgs(mode?: string, environmentId?: string) {
+		const qs = new URLSearchParams();
+		if (mode) qs.set("mode", mode);
+		if (environmentId) qs.set("environment_id", environmentId);
+		const q = qs.toString();
+		return this.request("GET", `/orgs${q ? `?${q}` : ""}`);
 	}
-	createOrg(name: string) {
-		return this.request("POST", "/orgs", { name });
+	createOrg(name: string, mode?: string, environmentId?: string) {
+		return this.request("POST", "/orgs", {
+			name,
+			...(mode ? { mode } : {}),
+			...(environmentId ? { environment_id: environmentId } : {}),
+		});
 	}
 	renameOrg(id: string, name: string) {
 		return this.request("PUT", `/orgs/${id}`, { name });
@@ -53,8 +61,13 @@ export class KreditAPI {
 	}
 
 	// Agents
-	listAgents(orgId?: string) {
-		return this.request("GET", `/agents${orgId ? `?org_id=${orgId}` : ""}`);
+	listAgents(orgId?: string, mode?: string, environmentId?: string) {
+		const qs = new URLSearchParams();
+		if (orgId) qs.set("org_id", orgId);
+		if (mode) qs.set("mode", mode);
+		if (environmentId) qs.set("environment_id", environmentId);
+		const q = qs.toString();
+		return this.request("GET", `/agents${q ? `?${q}` : ""}`);
 	}
 	createAgent(data: any) {
 		return this.request("POST", "/agents", data);
@@ -108,8 +121,12 @@ export class KreditAPI {
 	}
 
 	// Fleet
-	fleetOverview() {
-		return this.request("GET", "/fleet/overview");
+	fleetOverview(mode?: string, environmentId?: string) {
+		const qs = new URLSearchParams();
+		if (mode) qs.set("mode", mode);
+		if (environmentId) qs.set("environment_id", environmentId);
+		const q = qs.toString();
+		return this.request("GET", `/fleet/overview${q ? `?${q}` : ""}`);
 	}
 
 	// Transactions
@@ -118,6 +135,8 @@ export class KreditAPI {
 		if (params?.agent_id) qs.set("agent_id", params.agent_id);
 		if (params?.status) qs.set("status", params.status);
 		if (params?.limit) qs.set("limit", String(params.limit));
+		if (params?.mode) qs.set("mode", params.mode);
+		if (params?.environment_id) qs.set("environment_id", params.environment_id);
 		const q = qs.toString();
 		return this.request("GET", `/transactions${q ? `?${q}` : ""}`);
 	}
@@ -126,5 +145,180 @@ export class KreditAPI {
 	listEvents(agentId: string, eventType?: string) {
 		const q = eventType ? `?event_type=${eventType}` : "";
 		return this.request("GET", `/agents/${agentId}/events${q}`);
+	}
+
+	// ── Sandboxes (environment containers) ──
+	listSandboxes() {
+		return this.request("GET", "/sandboxes");
+	}
+	createSandbox(data: any) {
+		return this.request("POST", "/sandboxes", data);
+	}
+	getSandbox(id: string) {
+		return this.request("GET", `/sandboxes/${id}`);
+	}
+	updateSandbox(id: string, data: any) {
+		return this.request("PUT", `/sandboxes/${id}`, data);
+	}
+	deleteSandbox(id: string) {
+		return this.request("DELETE", `/sandboxes/${id}`);
+	}
+	copySandbox(id: string, name: string) {
+		return this.request("POST", `/sandboxes/${id}/copy`, { name });
+	}
+	promotePreview(id: string) {
+		return this.request("POST", `/sandboxes/${id}/promote/preview`);
+	}
+	promoteProduction(id: string) {
+		return this.request("POST", `/sandboxes/${id}/promote/production`);
+	}
+	sandboxVersions(id: string) {
+		return this.request("GET", `/sandboxes/${id}/versions`);
+	}
+	switchVersion(id: string, version: number) {
+		return this.request("POST", `/sandboxes/${id}/switch/${version}`);
+	}
+	deployMode(id: string, data: any) {
+		return this.request("POST", `/sandboxes/${id}/deploy`, data);
+	}
+
+	// ── Simulations ──
+	runSimulation(data: any) {
+		return this.request("POST", "/simulations/run", data);
+	}
+	listSimulations(sandboxId?: string) {
+		return this.request(
+			"GET",
+			`/simulations${sandboxId ? `?sandbox_id=${sandboxId}` : ""}`,
+		);
+	}
+	getSimulation(id: string) {
+		return this.request("GET", `/simulations/${id}`);
+	}
+	stopSimulation(id: string) {
+		return this.request("POST", `/simulations/${id}/stop`);
+	}
+
+	// ── Priors ──
+	getPriorPresets() {
+		return this.request("GET", "/priors/presets");
+	}
+	listPriors(sandboxId: string, mode?: string, environmentId?: string) {
+		const qs = new URLSearchParams();
+		qs.set("sandbox_id", sandboxId);
+		if (mode) qs.set("mode", mode);
+		if (environmentId) qs.set("environment_id", environmentId);
+		return this.request("GET", `/priors?${qs.toString()}`);
+	}
+	createPrior(sandboxId: string, data: any) {
+		return this.request(
+			"POST",
+			`/priors?sandbox_id=${encodeURIComponent(sandboxId)}`,
+			data,
+		);
+	}
+	updatePrior(priorId: string, data: any) {
+		return this.request("PUT", `/priors/${priorId}`, data);
+	}
+	deletePrior(priorId: string) {
+		return this.request("DELETE", `/priors/${priorId}`);
+	}
+
+	// ── Workflows ──
+	listWorkflows(sandboxId: string, mode?: string, environmentId?: string) {
+		const qs = new URLSearchParams();
+		qs.set("sandbox_id", sandboxId);
+		if (mode) qs.set("mode", mode);
+		if (environmentId) qs.set("environment_id", environmentId);
+		return this.request("GET", `/workflows?${qs.toString()}`);
+	}
+	createWorkflow(data: any) {
+		return this.request("POST", "/workflows", data);
+	}
+	getWorkflow(id: string) {
+		return this.request("GET", `/workflows/${id}`);
+	}
+	updateWorkflow(id: string, data: any) {
+		return this.request("PUT", `/workflows/${id}`, data);
+	}
+	deleteWorkflow(id: string) {
+		return this.request("DELETE", `/workflows/${id}`);
+	}
+	simulateWorkflow(id: string, seed?: number) {
+		return this.request(
+			"POST",
+			`/workflows/${id}/simulate${seed !== undefined ? `?seed=${seed}` : ""}`,
+		);
+	}
+	executeWorkflow(id: string, seed?: number) {
+		return this.request(
+			"POST",
+			`/workflows/${id}/execute${seed !== undefined ? `?seed=${seed}` : ""}`,
+		);
+	}
+	listWorkflowRuns(id: string) {
+		return this.request("GET", `/workflows/${id}/runs`);
+	}
+	getWorkflowRun(runId: string) {
+		return this.request("GET", `/workflows/runs/${runId}`);
+	}
+
+	// ── Environments ──
+	listEnvironments(sandboxId: string) {
+		return this.request(
+			"GET",
+			`/environments?sandbox_id=${encodeURIComponent(sandboxId)}`,
+		);
+	}
+	createEnvironment(data: any) {
+		return this.request("POST", "/environments", data);
+	}
+	getEnvironment(id: string) {
+		return this.request("GET", `/environments/${id}`);
+	}
+	deleteEnvironment(id: string) {
+		return this.request("DELETE", `/environments/${id}`);
+	}
+
+	// ── Chats ──
+	listChats(sandboxId?: string) {
+		return this.request(
+			"GET",
+			`/chats${sandboxId ? `?sandbox_id=${encodeURIComponent(sandboxId)}` : ""}`,
+		);
+	}
+	createChat(data: any) {
+		return this.request("POST", "/chats", data);
+	}
+	getChat(id: string) {
+		return this.request("GET", `/chats/${id}`);
+	}
+	deleteChat(id: string) {
+		return this.request("DELETE", `/chats/${id}`);
+	}
+
+	// ── Integrations ──
+	listIntegrations(sandboxId?: string) {
+		return this.request(
+			"GET",
+			`/integrations${sandboxId ? `?sandbox_id=${sandboxId}` : ""}`,
+		);
+	}
+
+	// ── Action verbs ──
+	actionIntent(data: any) {
+		return this.request("POST", "/actions/intent", data);
+	}
+	executeAction(data: any) {
+		return this.request("POST", "/actions/execute", data);
+	}
+	run(data: any) {
+		return this.request("POST", "/actions/run", data);
+	}
+	scoreTrust(agentId: string) {
+		return this.request("POST", "/actions/score", { agent_id: agentId });
+	}
+	optimize(data: any) {
+		return this.request("POST", "/actions/optimize", data);
 	}
 }

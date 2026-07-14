@@ -5,10 +5,19 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+def _flat_week() -> list[float]:
+    return [1.0] * 7
+
+
+def _flat_day() -> list[float]:
+    return [1.0] * 24
+
+
 class Org(BaseModel):
     """Organization."""
     id: str
     name: str
+    mode: str = ""
     created_at: str | None = None
 
 
@@ -45,10 +54,13 @@ class Agent(BaseModel):
     """Agent resource."""
     id: str
     org_id: str
+    sandbox_id: str | None = None
     name: str
+    mode: str = ""
     status: str = "active"
     priority: str = "normal"
     wallet: Wallet | None = None
+    budgets: dict | None = None
     credit: Credit | None = None
     rules: list[Rule] = []
     created_at: str | None = None
@@ -79,6 +91,7 @@ class Transaction(BaseModel):
     id: str
     org_id: str
     agent_id: str
+    mode: str = ""
     type: str = "api_call"
     action: str
     status: str
@@ -143,3 +156,118 @@ class Event(BaseModel):
     before: dict | None = None
     after: dict | None = None
     timestamp: str
+
+
+class Gaussian(BaseModel):
+    """Gaussian(mean, variance) distribution used by priors."""
+    mean: float = 0.0
+    variance: float = 0.0
+
+
+class Seasonality(BaseModel):
+    """Day-of-week (7) × hour-of-day (24) traffic multipliers."""
+    dow: list[float] = Field(default_factory=_flat_week)   # Mon..Sun multipliers
+    hour: list[float] = Field(default_factory=_flat_day)   # 0..23 multipliers
+
+
+class Prior(BaseModel):
+    """A distribution assumption that drives simulations, per sandbox+mode."""
+    id: str
+    sandbox_id: str
+    mode: str = ""
+    name: str = ""
+    workflow_id: str = ""  # "" = applies to the whole sandbox+mode
+    frequency: Gaussian = Field(default_factory=Gaussian)  # actions/hour
+    cost: Gaussian = Field(default_factory=Gaussian)  # dollars per action
+    transitions: dict = {}
+    seasonality: Seasonality = Field(default_factory=Seasonality)
+    source: str = "manual"  # "manual" | "learned"
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class WorkflowNode(BaseModel):
+    """A node in a workflow graph."""
+    id: str
+    type: str = "tool"  # agent | llm | api | tool | payment
+    label: str = ""
+    integration: str = ""
+    config: dict = {}
+
+
+class WorkflowEdge(BaseModel):
+    """A directed edge between two workflow nodes.
+
+    ``from`` is a Python keyword, so it is exposed as ``from_`` with a
+    populate-by-name alias.
+    """
+    model_config = {"populate_by_name": True}
+
+    from_: str = Field(alias="from")
+    to: str
+    condition: str = ""
+
+
+class Workflow(BaseModel):
+    """An orchestration graph of nodes and edges, per sandbox+mode."""
+    id: str
+    sandbox_id: str
+    mode: str = ""
+    name: str = ""
+    nodes: list[WorkflowNode] = []
+    edges: list[WorkflowEdge] = []
+    version: int = 1
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class Environment(BaseModel):
+    """An environment within a sandbox.
+
+    The 4 modes are standard environments; each simulation is its own
+    environment nested inside its parent mode environment.
+    """
+    id: str
+    sandbox_id: str
+    user_id: str = ""
+    kind: str = ""  # simulation | development | preview | production | simulation-run
+    name: str = ""
+    simulation_id: str | None = None
+    parent_environment_id: str | None = None
+    active: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ChatComponent(BaseModel):
+    """A rich component attached to a chat message."""
+    type: str = ""
+    ref_id: str = ""
+    title: str = ""
+    data: dict = {}
+
+
+class Message(BaseModel):
+    """A single message in a Kredit-agent chat."""
+    id: str
+    chat_id: str = ""
+    role: str = ""  # user | assistant | tool | system
+    content: str = ""
+    tool_calls: list[dict] = []
+    components: list[ChatComponent] = []
+    created_at: str | None = None
+
+
+class Chat(BaseModel):
+    """A persisted Kredit-agent conversation.
+
+    ``messages`` is populated by :meth:`Kredit.chats.get`; list responses omit it.
+    """
+    id: str
+    sandbox_id: str | None = None
+    mode: str = ""
+    simulation_id: str | None = None
+    title: str = ""
+    messages: list[Message] = []
+    created_at: str | None = None
+    updated_at: str | None = None
