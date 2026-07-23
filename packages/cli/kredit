@@ -432,8 +432,11 @@ cmd_rules() {
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
+# check runs against ONE environment's state (wallet, counters, score live on
+# the env), so --environment-id is required — it names whose state the check
+# consumes and mutates.
 cmd_check() {
-  local agent_id="" action="" estimated_cost="" type="api_call" mode=""
+  local agent_id="" action="" estimated_cost="" type="api_call" environment_id=""
 
   for arg in "$@"; do
     case "$arg" in
@@ -441,8 +444,8 @@ cmd_check() {
       --action=*) action="${arg#--action=}" ;;
       --estimated-cost=*) estimated_cost="${arg#--estimated-cost=}" ;;
       --type=*) type="${arg#--type=}" ;;
-      --mode=*) mode="${arg#--mode=}" ;;
-      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST [--type=TYPE] [--mode=MODE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; echo "  MODE: simulation, preview, production"; return 0 ;;
+      --environment-id=*|--env-id=*) environment_id="${arg#*=}" ;;
+      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST --environment-id=ENV [--type=TYPE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; echo "  ENV:  the environment whose agent state the check runs against"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
@@ -450,15 +453,14 @@ cmd_check() {
   [ -z "$agent_id" ] && die "Missing --agent-id"
   [ -z "$action" ] && die "Missing --action"
   [ -z "$estimated_cost" ] && die "Missing --estimated-cost"
+  [ -z "$environment_id" ] && die "Missing --environment-id (state and versions live on the environment; see 'kredit environment list')"
 
   case "$type" in
     api_call|compute|data|tool|other) ;;
     *) die "Invalid --type: $type. Valid values: api_call, compute, data, tool, other" ;;
   esac
 
-  local body="{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\",\"estimated_cost\":${estimated_cost},\"type\":\"${type}\""
-  if [ -n "$mode" ]; then validate_mode "$mode"; body="${body},\"mode\":\"${mode}\""; fi
-  body="${body}}"
+  local body="{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\",\"estimated_cost\":${estimated_cost},\"type\":\"${type}\",\"environment_id\":\"${environment_id}\"}"
 
   api_request POST "/check" "$body"
 }
@@ -876,6 +878,60 @@ cmd_verify() {
   esac
 }
 
+# Identity tokens, issued by a provider (default: kredit itself).
+#   kya → agent   (--agent-id | --name | positional)   POST /agents/kya-token
+#   kyb → org     (--org-id   | --name | positional)   POST /orgs/kyb-token
+#   kyc → account (no subject — the authed user)       POST /account/kyc-token
+# A 24-hex positional is treated as an id, anything else as a (sandbox-unique)
+# name. The token is shown ONCE; the server stores only a hash.
+_identity_token() {
+  local kind="$1" id_field="$2" path="$3"; shift 3
+  local kind_uc
+  kind_uc=$(echo "$kind" | tr '[:lower:]' '[:upper:]')
+  local subject_id="" name="" sandbox_id="" provider=""
+  for arg in "$@"; do
+    case "$arg" in
+      "--${id_field}="*) subject_id="${arg#*=}" ;;
+      --name=*) name="${arg#--name=}" ;;
+      --sandbox-id=*) sandbox_id="${arg#--sandbox-id=}" ;;
+      --provider=*) provider="${arg#--provider=}" ;;
+      --help)
+        if [ "$kind" = "kyc" ]; then
+          echo "Usage: kredit kyc [--provider=kredit]"
+          echo "Issues a ${kind_uc} token for your account."
+        else
+          echo "Usage: kredit ${kind} <name-or-id>"
+          echo "       kredit ${kind} --${id_field}=ID | --name=NAME [--sandbox-id=ID] [--provider=kredit]"
+          echo "Issues a ${kind_uc} token (name must be unique)."
+        fi
+        return 0 ;;
+      -*) die "Unknown argument: $arg" ;;
+      *)
+        if [[ "$arg" =~ ^[0-9a-f]{24}$ ]]; then subject_id="$arg"; else name="$arg"; fi ;;
+    esac
+  done
+
+  local body="{"
+  local sep=""
+  if [ "$kind" != "kyc" ]; then
+    [ -z "$subject_id" ] && [ -z "$name" ] && die "Missing subject: pass a name/id, --${id_field} or --name"
+    [ -n "$subject_id" ] && [ -n "$name" ] && die "Pass either an id or a name, not both"
+    if [ -n "$subject_id" ]; then
+      body="${body}\"${id_field//-/_}\":\"${subject_id}\""; sep=","
+    else
+      body="${body}\"name\":\"${name}\""; sep=","
+      if [ -n "$sandbox_id" ]; then body="${body}${sep}\"sandbox_id\":\"${sandbox_id}\""; fi
+    fi
+  fi
+  if [ -n "$provider" ]; then body="${body}${sep}\"provider\":\"${provider}\""; fi
+  body="${body}}"
+  api_request POST "$path" "$body"
+}
+
+cmd_kya() { _identity_token kya agent-id "/agents/kya-token" "$@"; }
+cmd_kyb() { _identity_token kyb org-id "/orgs/kyb-token" "$@"; }
+cmd_kyc() { _identity_token kyc "" "/account/kyc-token" "$@"; }
+
 cmd_optimize() {
   local sandbox_id="" period="1mo" apply="true"
   for arg in "$@"; do
@@ -894,7 +950,7 @@ cmd_optimize() {
 # kredit run <action> — one-shot full 6-stage trusted path (intent → identity →
 # trust → execute → observe → optimize). Prints the returned trust_card.
 cmd_run() {
-  local action="" agent_id="" cost="" type="" provider="" mode="" outcome=""
+  local action="" agent_id="" cost="" type="" provider="" mode="" outcome="" environment_id=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -908,13 +964,15 @@ cmd_run() {
       --provider=*) provider="${1#--provider=}"; shift ;;
       --mode) mode="${2:-}"; shift 2 ;;
       --mode=*) mode="${1#--mode=}"; shift ;;
+      --environment-id|--env-id) environment_id="${2:-}"; shift 2 ;;
+      --environment-id=*|--env-id=*) environment_id="${1#*=}"; shift ;;
       --outcome) outcome="${2:-}"; shift 2 ;;
       --outcome=*) outcome="${1#--outcome=}"; shift ;;
       --help)
-        echo "Usage: kredit run <action> --agent <agent_id> [--cost <n>] [--type <t>] [--provider <p>] [--mode <m>]"
+        echo "Usage: kredit run <action> --agent <agent_id> --environment-id <env> [--cost <n>] [--type <t>] [--provider <p>]"
         echo "  Runs the full 6-stage trusted path and prints the trust_card."
         echo "  TYPE: api_call, compute, data, tool, other"
-        echo "  MODE: simulation, preview, production"
+        echo "  ENV:  the environment whose agent state the run executes against"
         return 0 ;;
       --*) die "Unknown argument: $1" ;;
       *)
@@ -925,8 +983,9 @@ cmd_run() {
 
   [ -z "$action" ] && die "Missing <action>"
   [ -z "$agent_id" ] && die "Missing --agent"
+  [ -z "$environment_id" ] && die "Missing --environment-id (state and versions live on the environment; see 'kredit environment list')"
 
-  local body="{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\""
+  local body="{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\",\"environment_id\":\"${environment_id}\""
   [ -n "$cost" ] && body="${body},\"estimated_cost\":${cost}"
   [ -n "$type" ] && body="${body},\"type\":\"${type}\""
   [ -n "$provider" ] && body="${body},\"provider\":\"${provider}\""
@@ -1111,22 +1170,17 @@ cmd_workflow() {
 
   case "$subcmd" in
     list)
+      # workflows are sandbox-level definitions — no env/mode scope on listing
       local sid; sid=$(resolve_sandbox_id "$sandbox_id")
       [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      local query="sandbox_id=${sid}"
-      if [ -n "$mode" ]; then validate_mode "$mode"; query="${query}&mode=${mode}"; fi
-      [ -n "$environment_id" ] && query="${query}&environment_id=${environment_id}"
-      api_request GET "/workflows?${query}"
+      api_request GET "/workflows?sandbox_id=${sid}"
       ;;
     create)
       [ -z "$name" ] && die "Missing --name"
       local sid; sid=$(resolve_sandbox_id "$sandbox_id")
       [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      [ -n "$mode" ] && validate_mode "$mode"
       local gcontent; gcontent=$(resolve_graph)
       local body="{\"sandbox_id\":\"${sid}\",\"name\":\"${name}\""
-      [ -n "$mode" ] && body="${body},\"mode\":\"${mode}\""
-      [ -n "$environment_id" ] && body="${body},\"environment_id\":\"${environment_id}\""
       body="${body},${gcontent}}"
       api_request POST "/workflows" "$body"
       ;;
@@ -1154,10 +1208,13 @@ cmd_workflow() {
       api_request DELETE "/workflows/${id}"
       ;;
     run)
+      # the environment is chosen at execution time — the definition is env-free
       local id="${positionals[0]:-}"
-      [ -z "$id" ] && die "Missing <id>. Usage: kredit workflow run <id> [--seed=N]"
+      [ -z "$id" ] && die "Missing <id>. Usage: kredit workflow run <id> [--environment-id=ENV] [--seed=N]"
+      local q="seed=${seed}"
+      [ -n "$environment_id" ] && q="${q}&environment_id=${environment_id}"
       local resp
-      resp=$(api_request POST "/workflows/${id}/simulate?seed=${seed}") || return 1
+      resp=$(api_request POST "/workflows/${id}/simulate?${q}") || return 1
       if command -v jq &>/dev/null; then
         echo "  workflow: $(echo "$resp" | jq -r '.workflow_id // "-"')  mode: $(echo "$resp" | jq -r '.mode // "-"')"
         echo "  nodes: $(echo "$resp" | jq -r '.node_count // 0')  blocked: $(echo "$resp" | jq -r '.blocked_count // 0')  total_cost: \$$(echo "$resp" | jq -r '.total_cost // 0')"
@@ -1169,9 +1226,10 @@ cmd_workflow() {
       ;;
     execute)
       local id="${positionals[0]:-}"
-      [ -z "$id" ] && die "Missing <id>. Usage: kredit workflow execute <id> [--seed=N]"
+      [ -z "$id" ] && die "Missing <id>. Usage: kredit workflow execute <id> --environment-id=ENV [--seed=N]"
+      [ -z "$environment_id" ] && die "Missing --environment-id (execution runs against one environment's state)"
       local resp
-      resp=$(api_request POST "/workflows/${id}/execute?seed=${seed}") || return 1
+      resp=$(api_request POST "/workflows/${id}/execute?seed=${seed}&environment_id=${environment_id}") || return 1
       if command -v jq &>/dev/null; then
         echo "  run: $(echo "$resp" | jq -r '.id // "-"')  workflow: $(echo "$resp" | jq -r '.workflow_id // "-"')  mode: $(echo "$resp" | jq -r '.mode // "-"')  status: $(echo "$resp" | jq -r '.status // "-"')"
         echo "  nodes: $(echo "$resp" | jq -r '.node_count // 0')  blocked: $(echo "$resp" | jq -r '.blocked_count // 0')  total_cost: \$$(echo "$resp" | jq -r '.total_cost // 0')"
@@ -1402,6 +1460,9 @@ Commands:
   action      Dry-run the trust layer (action intent)
   execute     Execute a payment/api/tool action (env-gated)
   verify      Run identity verification (kya/kyb/kyc)
+  kya         Issue a KYA token for an agent (by name or id) [--provider]
+  kyb         Issue a KYB token for an org (by name or id) [--provider]
+  kyc         Issue a KYC token for your account [--provider]
   optimize    Optimize a sandbox's guardrails from a simulation
   priors      Manage a sandbox's behavioural priors (list, presets, set, delete)
   workflow    Manage sandbox workflows (list, create, get, update, delete, run, execute, runs, run-get)
@@ -1419,20 +1480,21 @@ Commands:
 Modes:
   Sandboxes carry a mode per fleet/rule scope. Fresh sandboxes land in
   `simulation`. Promote order: simulation → preview → production.
-  orgs/agents (list, create), rules add, and check accept an optional --mode.
-  `kredit sandbox deploy` copies one mode's fleet/rules into another.
-  orgs/agents/priors/workflow (list, create/set) also accept an optional
-  --environment-id (alias --env-id) — the canonical scope; --mode scopes by
-  mode name when no environment id is given.
+  Agent STATE (wallet, counters, score) and versions live on an ENVIRONMENT, so
+  `check`, `run`, and `workflow execute` require --environment-id (alias
+  --env-id). orgs/agents/priors (list, create/set) accept an optional
+  --environment-id; --mode scopes by mode name when no environment id is given.
+  Workflows are sandbox-level definitions — the environment is chosen at
+  execution time. `kredit sandbox deploy` copies one mode's fleet/rules into
+  another.
 
 Options:
   --help      Show help for a command
   --version   Print version
 
 Examples:
-  kredit check --agent-id=agt_8f3k2m --action=serp_api.search --estimated-cost=1 --type=api_call
-  kredit check --agent-id=agt_8f3k2m --action=openai.chat --estimated-cost=1 --mode=production
-  kredit run openai.chat --agent agt_8f3k2m --cost 1 --type api_call
+  kredit check --agent-id=agt_8f3k2m --action=serp_api.search --estimated-cost=1 --environment-id=env_123
+  kredit run openai.chat --agent agt_8f3k2m --environment-id env_123 --cost 1 --type api_call
   kredit report --transaction-id=txn_abc --outcome=success --actual-cost=1
   kredit agents list --org-id=org_123 --mode=simulation
   kredit agents create --org-name=research-team --name=bot-01 --mode=preview
@@ -1441,12 +1503,18 @@ Examples:
   kredit orgs create --name=research-team
   kredit score --agent-id=agt_8f3k2m
   kredit wallet --agent-id=agt_8f3k2m
+  kredit kya checkout-bot
+  kredit kya --agent-id=agt_8f3k2m --provider=skyfire
+  kredit kyb research-team
+  kredit kyb --org-id=org_123 --provider=experian
+  kredit kyc --provider=plaid
   kredit sandbox deploy simulation preview --include=orgs,agents,rules --sandbox-id=sbx_123
   kredit priors presets
   kredit priors set --name=web-search --frequency-mean=6 --cost-mean=3 --seasonality-preset=weekday --sandbox-id=sbx_123
   kredit priors list --sandbox-id=sbx_123
   kredit workflow create --name=demo --graph='{"nodes":[{"id":"n1","type":"llm"}],"edges":[]}' --sandbox-id=sbx_123
   kredit workflow run wf_123 --seed=5
+  kredit workflow execute wf_123 --environment-id=env_123
   kredit environment list --sandbox-id=sbx_123
   kredit environment create --mode=simulation --name=exp-a --sandbox-id=sbx_123
   kredit chat list --sandbox-id=sbx_123
@@ -1480,6 +1548,9 @@ main() {
     action)   cmd_action "$@" ;;
     execute)  cmd_execute "$@" ;;
     verify)   cmd_verify "$@" ;;
+    kya)      cmd_kya "$@" ;;
+    kyb)      cmd_kyb "$@" ;;
+    kyc)      cmd_kyc "$@" ;;
     optimize) cmd_optimize "$@" ;;
     priors)   cmd_priors "$@" ;;
     workflow) cmd_workflow "$@" ;;
