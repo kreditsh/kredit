@@ -445,7 +445,7 @@ cmd_check() {
       --estimated-cost=*) estimated_cost="${arg#--estimated-cost=}" ;;
       --type=*) type="${arg#--type=}" ;;
       --environment-id=*|--env-id=*) environment_id="${arg#*=}" ;;
-      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST --environment-id=ENV [--type=TYPE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; echo "  ENV:  the environment whose agent state the check runs against"; return 0 ;;
+      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST --environment-id=ENV [--type=TYPE]"; echo "  TYPE: api_call (default), mcp_call, compute, data, tool, other"; echo "  ENV:  the environment whose agent state the check runs against"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
@@ -456,8 +456,8 @@ cmd_check() {
   [ -z "$environment_id" ] && die "Missing --environment-id (state and versions live on the environment; see 'kredit environment list')"
 
   case "$type" in
-    api_call|compute|data|tool|other) ;;
-    *) die "Invalid --type: $type. Valid values: api_call, compute, data, tool, other" ;;
+    api_call|mcp_call|compute|data|tool|other) ;;
+    *) die "Invalid --type: $type. Valid values: api_call, mcp_call, compute, data, tool, other" ;;
   esac
 
   local body="{\"agent_id\":\"${agent_id}\",\"action\":\"${action}\",\"estimated_cost\":${estimated_cost},\"type\":\"${type}\",\"environment_id\":\"${environment_id}\"}"
@@ -971,7 +971,7 @@ cmd_run() {
       --help)
         echo "Usage: kredit run <action> --agent <agent_id> --environment-id <env> [--cost <n>] [--type <t>] [--provider <p>]"
         echo "  Runs the full 6-stage trusted path and prints the trust_card."
-        echo "  TYPE: api_call, compute, data, tool, other"
+        echo "  TYPE: api_call, mcp_call, compute, data, tool, other"
         echo "  ENV:  the environment whose agent state the run executes against"
         return 0 ;;
       --*) die "Unknown argument: $1" ;;

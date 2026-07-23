@@ -250,15 +250,15 @@ function createServer(api: KreditAPI): McpServer {
 				.describe("Action name, e.g. 'openai.chat', 'flight.booking'"),
 			estimated_cost: z.number().describe("Estimated cost in dollars"),
 			type: z
-				.enum(["api_call", "compute", "data", "tool", "other"])
+				.enum(["api_call", "mcp_call", "compute", "data", "tool", "other"])
 				.optional()
-				.describe("Transaction type, defaults to api_call"),
+				.describe("Transaction type; MCP-originated calls default to mcp_call"),
 			metadata: z
 				.record(z.string(), z.unknown())
 				.optional()
 				.describe("Freeform metadata for the transaction"),
 		},
-		(args) => api.check(args),
+		(args) => api.check({ type: "mcp_call", ...args }),
 	);
 	tool(
 		server,
@@ -804,16 +804,16 @@ function createServer(api: KreditAPI): McpServer {
 				.optional()
 				.describe("Estimated cost in dollars"),
 			type: z
-				.enum(["api_call", "compute", "data", "tool", "other"])
+				.enum(["api_call", "mcp_call", "compute", "data", "tool", "other"])
 				.optional()
-				.describe("Transaction type, defaults to api_call"),
+				.describe("Transaction type; MCP-originated calls default to mcp_call"),
 			provider: z.string().optional(),
 			outcome: z
 				.enum(["success", "failure", "partial"])
 				.optional()
 				.describe("Optional pre-set outcome for the observe stage"),
 		},
-		(args) => api.run(args),
+		(args) => api.run({ type: "mcp_call", ...args }),
 	);
 	tool(
 		server,
