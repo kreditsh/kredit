@@ -791,11 +791,11 @@ class Environments {
 	/** Create an environment. `sandbox_id` is sent in the body. */
 	async create(
 		sandboxId: string,
-		params: { kind: string; name?: string; simulationId?: string },
+		params: { mode: string; name?: string; simulationId?: string },
 	): Promise<Environment> {
 		const body: Record<string, unknown> = {
 			sandbox_id: sandboxId,
-			kind: params.kind,
+			mode: params.mode,
 		};
 		if (params.name !== undefined) body.name = params.name;
 		if (params.simulationId !== undefined)

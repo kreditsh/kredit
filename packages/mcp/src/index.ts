@@ -36,10 +36,10 @@ function tool(
 }
 
 const MODE_DESC =
-	"Environment mode to scope to: simulation | development | preview | production";
+	"Environment mode to scope to: simulation | preview | production";
 const modeField = () =>
 	z
-		.enum(["simulation", "development", "preview", "production"])
+		.enum(["simulation", "preview", "production"])
 		.optional()
 		.describe(MODE_DESC);
 
@@ -55,14 +55,14 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_list_orgs",
-		"List all organizations, optionally scoped to a mode (simulation | development | preview | production)",
+		"List all organizations, optionally scoped to a mode (simulation | preview | production)",
 		{ mode: modeField(), environment_id: environmentIdField() },
 		({ mode, environment_id }) => api.listOrgs(mode, environment_id),
 	);
 	tool(
 		server,
 		"kredit_create_org",
-		"Create an organization, optionally in a specific mode (simulation | development | preview | production) or environment",
+		"Create an organization, optionally in a specific mode (simulation | preview | production) or environment",
 		{
 			name: z.string(),
 			mode: modeField(),
@@ -90,7 +90,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_list_agents",
-		"List agents, optionally filtered by org and scoped to a mode (simulation | development | preview | production)",
+		"List agents, optionally filtered by org and scoped to a mode (simulation | preview | production)",
 		{
 			org_id: z.string().optional(),
 			mode: modeField(),
@@ -102,7 +102,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_create_agent",
-		"Create an agent with wallet, priority, and rules, optionally in a specific mode (simulation | development | preview | production)",
+		"Create an agent with wallet, priority, and rules, optionally in a specific mode (simulation | preview | production)",
 		{
 			org_name: z
 				.string()
@@ -190,7 +190,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_add_rule",
-		"Add a spending rule to an agent, optionally scoped to a mode (simulation | development | preview | production); omit to apply to all modes",
+		"Add a spending rule to an agent, optionally scoped to a mode (simulation | preview | production); omit to apply to all modes",
 		{
 			agent_id: z.string(),
 			name: z.string().describe("Rule name"),
@@ -305,7 +305,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_fleet",
-		"Get fleet overview stats, optionally scoped to a mode (simulation | development | preview | production)",
+		"Get fleet overview stats, optionally scoped to a mode (simulation | preview | production)",
 		{ mode: modeField(), environment_id: environmentIdField() },
 		({ mode, environment_id }) => api.fleetOverview(mode, environment_id),
 	);
@@ -343,7 +343,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_transactions",
-		"List transactions (audit log), optionally scoped to a mode (simulation | development | preview | production)",
+		"List transactions (audit log), optionally scoped to a mode (simulation | preview | production)",
 		{
 			agent_id: z.string().optional(),
 			status: z.enum(["allowed", "blocked", "flagged"]).optional(),
@@ -378,7 +378,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_create_sandbox",
-		"Create a named dev sandbox",
+		"Create a named sandbox (starts in simulation mode)",
 		{ name: z.string(), config: z.record(z.string(), z.any()).optional() },
 		({ name, config }) => api.createSandbox({ name, config }),
 	);
@@ -403,7 +403,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_promote_preview",
-		"Copy a dev sandbox's config to the preview environment",
+		"Copy a simulation sandbox's config to the preview environment",
 		{ sandbox_id: z.string() },
 		({ sandbox_id }) => api.promotePreview(sandbox_id),
 	);
@@ -424,14 +424,14 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_deploy_mode",
-		"Deploy a sandbox's orgs/agents/rules from one mode to another (simulation | development | preview | production)",
+		"Deploy a sandbox's orgs/agents/rules from one mode to another (simulation | preview | production)",
 		{
 			sandbox_id: z.string(),
 			from_mode: z
-				.enum(["simulation", "development", "preview", "production"])
+				.enum(["simulation", "preview", "production"])
 				.describe("Source mode to deploy from"),
 			to_mode: z
-				.enum(["simulation", "development", "preview", "production"])
+				.enum(["simulation", "preview", "production"])
 				.describe("Target mode to deploy to"),
 			include: z
 				.array(z.enum(["orgs", "agents", "rules"]))
@@ -475,7 +475,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_list_priors",
-		"List demand priors (expected call frequency, cost, and seasonality) for a sandbox, optionally scoped to a mode (simulation | development | preview | production)",
+		"List demand priors (expected call frequency, cost, and seasonality) for a sandbox, optionally scoped to a mode (simulation | preview | production)",
 		{
 			sandbox_id: z.string().describe("Sandbox to list priors for"),
 			mode: modeField(),
@@ -614,7 +614,7 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_list_workflows",
-		"List agent workflows (node/edge graphs) for a sandbox, optionally scoped to a mode (simulation | development | preview | production)",
+		"List agent workflows (node/edge graphs) for a sandbox, optionally scoped to a mode (simulation | preview | production)",
 		{
 			sandbox_id: z.string().describe("Sandbox to list workflows for"),
 			mode: modeField(),
@@ -713,35 +713,29 @@ function createServer(api: KreditAPI): McpServer {
 	tool(
 		server,
 		"kredit_list_environments",
-		"List environments in a sandbox. A sandbox contains environments: the 4 modes (simulation | development | preview | production) are standard environments, and each simulation run is its own environment nested inside its parent mode environment.",
+		"List environments in a sandbox. A sandbox contains environments: the 3 modes (simulation | preview | production) are standard environments (exactly one production environment per sandbox), and each simulation run is its own simulation-mode environment nested inside its parent environment.",
 		{ sandbox_id: z.string().describe("Sandbox to list environments for") },
 		({ sandbox_id }) => api.listEnvironments(sandbox_id),
 	);
 	tool(
 		server,
 		"kredit_create_environment",
-		"Create an environment inside a sandbox. Use kind 'simulation' to spin up a simulation environment (pass simulation_id to bind it to a simulation run).",
+		"Create an environment inside a sandbox. Use mode 'simulation' to spin up a simulation environment (pass simulation_id to bind it to a simulation run).",
 		{
 			sandbox_id: z.string().describe("Sandbox this environment belongs to"),
-			kind: z
-				.enum([
-					"simulation",
-					"development",
-					"preview",
-					"production",
-					"simulation-run",
-				])
-				.describe("Environment kind"),
+			mode: z
+				.enum(["simulation", "preview", "production"])
+				.describe("Environment mode"),
 			name: z.string().optional().describe("Optional environment name"),
 			simulation_id: z
 				.string()
 				.optional()
 				.describe("Simulation run id to bind this environment to"),
 		},
-		({ sandbox_id, kind, name, simulation_id }) =>
+		({ sandbox_id, mode, name, simulation_id }) =>
 			api.createEnvironment({
 				sandbox_id,
-				kind,
+				mode,
 				...(name ? { name } : {}),
 				...(simulation_id ? { simulation_id } : {}),
 			}),

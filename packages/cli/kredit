@@ -77,12 +77,12 @@ resolve_sandbox_id() {
   fi
 }
 
-# Modes in promote order: simulation → development → preview → production.
+# Modes in promote order: simulation → preview → production.
 # Fresh sandboxes land in `simulation`.
 validate_mode() {
   case "$1" in
-    simulation|development|preview|production) ;;
-    *) die "Invalid --mode: $1. Valid values: simulation, development, preview, production" ;;
+    simulation|preview|production) ;;
+    *) die "Invalid --mode: $1. Valid values: simulation, preview, production" ;;
   esac
 }
 
@@ -391,7 +391,7 @@ cmd_rules() {
           --daily-spend-limit=*) daily_spend_limit="${arg#--daily-spend-limit=}" ;;
           --hourly-rate-limit=*) hourly_rate_limit="${arg#--hourly-rate-limit=}" ;;
           --mode=*) mode="${arg#--mode=}" ;;
-          --help) echo "Usage: kredit rules add --agent-id=ID --name=NAME --match=PATTERN [--max-cost-per-txn=N] [--daily-spend-limit=N] [--hourly-rate-limit=N] [--mode=MODE]"; echo "  MODE: simulation, development, preview, production (omit = all modes)"; return 0 ;;
+          --help) echo "Usage: kredit rules add --agent-id=ID --name=NAME --match=PATTERN [--max-cost-per-txn=N] [--daily-spend-limit=N] [--hourly-rate-limit=N] [--mode=MODE]"; echo "  MODE: simulation, preview, production (omit = all modes)"; return 0 ;;
           *) die "Unknown argument: $arg" ;;
         esac
       done
@@ -442,7 +442,7 @@ cmd_check() {
       --estimated-cost=*) estimated_cost="${arg#--estimated-cost=}" ;;
       --type=*) type="${arg#--type=}" ;;
       --mode=*) mode="${arg#--mode=}" ;;
-      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST [--type=TYPE] [--mode=MODE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; echo "  MODE: simulation, development, preview, production"; return 0 ;;
+      --help) echo "Usage: kredit check --agent-id=ID --action=ACTION --estimated-cost=COST [--type=TYPE] [--mode=MODE]"; echo "  TYPE: api_call (default), compute, data, tool, other"; echo "  MODE: simulation, preview, production"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
@@ -717,7 +717,7 @@ Usage: kredit sandbox <subcommand>
   promote-preview --id=ID | promote-production --id=PREVIEW_ID
   deploy <from_mode> <to_mode> [--include=orgs,agents,rules] [--sandbox-id=ID] [--source-simulation-id=ID]
     copy a mode's orgs/agents/rules into another mode (does NOT change the active mode)
-    modes: simulation → development → preview → production
+    modes: simulation → preview → production
 H
       ;;
     *) die "Unknown sandbox subcommand: $subcmd" ;;
@@ -755,7 +755,7 @@ cmd_sim() {
       [ -z "$sid" ] && die "Usage: kredit simulation stop <simulation_id>"
       api_request POST "/simulations/${sid}/stop" ;;
     predictive)
-      [ -z "$sandbox_id" ] && die "Missing --sandbox-id (or run 'kredit init sandbox development <name>' and set up agents first)"
+      [ -z "$sandbox_id" ] && die "Missing --sandbox-id (or run 'kredit init sandbox simulation <name>' and set up agents first)"
       local pbody="{\"sandbox_id\":\"${sandbox_id}\",\"mode\":\"predictive\",\"period\":\"${period}\",\"seed\":${seed}}"
       api_request POST "/simulations/run" "$(merge_args "$pbody" "$args")" ;;
     run)
@@ -772,7 +772,7 @@ Usage: kredit simulation [subcommand]
   (none) | live [--sandbox-id=ID]
         run the live simulation — real transactions through the kredit cycle
         (intent → identity → trust → execute → observe → optimize).
-        Without --sandbox-id a development sandbox is created first.
+        Without --sandbox-id a new sandbox (in simulation mode) is created first.
   predictive --sandbox-id=ID [--period=1d|1wk|2wk|1mo|1quarter|1year] [--seed=N]
         project the sandbox's fleet over a horizon with weekly guardrail optimization
   run  --sandbox-id=ID [--mode=predictive|live] [--period=1mo] [--duration=60] [--seed=N]
@@ -783,18 +783,18 @@ H
   esac
 }
 
-# kredit init sandbox development <name> — create a sandbox (always starts in
-# development mode); the container that owns orgs, agents, rules & simulations.
+# kredit init sandbox simulation <name> — create a sandbox (always starts in
+# simulation mode); the container that owns orgs, agents, rules & simulations.
 cmd_init() {
   require_api_key
   local what="${1:-}"; shift 2>/dev/null || true
-  [ "$what" != "sandbox" ] && die "Usage: kredit init sandbox development <name>"
+  [ "$what" != "sandbox" ] && die "Usage: kredit init sandbox simulation <name>"
   local stage="${1:-}"
   case "$stage" in
-    simulation|development|preview|production) shift 2>/dev/null || true ;;
+    simulation|preview|production) shift 2>/dev/null || true ;;
   esac
   local name="${1:-}"
-  [ -z "$name" ] && die "Usage: kredit init sandbox development <name>"
+  [ -z "$name" ] && die "Usage: kredit init sandbox simulation <name>"
   api_request POST "/sandboxes" "{\"name\":\"${name}\"}"
 }
 
@@ -914,7 +914,7 @@ cmd_run() {
         echo "Usage: kredit run <action> --agent <agent_id> [--cost <n>] [--type <t>] [--provider <p>] [--mode <m>]"
         echo "  Runs the full 6-stage trusted path and prints the trust_card."
         echo "  TYPE: api_call, compute, data, tool, other"
-        echo "  MODE: simulation, development, preview, production"
+        echo "  MODE: simulation, preview, production"
         return 0 ;;
       --*) die "Unknown argument: $1" ;;
       *)
@@ -1048,7 +1048,7 @@ Usage: kredit priors <list|presets|set|delete>
 
   Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
   sandbox_id=... in ~/.kredit/config.
-  MODE: simulation, development, preview, production
+  MODE: simulation, preview, production
   ENV_ID: environment id (canonical scope; --env-id is an alias)
 H
       ;;
@@ -1222,7 +1222,7 @@ Usage: kredit workflow <list|create|get|update|delete|run|execute|runs|run-get>
   Node types: agent | llm | api | tool | payment
   Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
   sandbox_id=... in ~/.kredit/config.
-  MODE: simulation, development, preview, production
+  MODE: simulation, preview, production
   ENV_ID: environment id (canonical scope; --env-id is an alias)
 H
       ;;
@@ -1234,22 +1234,23 @@ H
 
 # ── Environments (the scope inside a sandbox: modes + per-simulation snapshots) ─
 #
-# A sandbox contains many environments. The 4 modes (simulation | development |
-# preview | production) are the standard environments (one per mode, kind==mode);
-# each simulation is its own environment (kind=="simulation-run") nested inside
-# its parent mode env via parent_environment_id. Orgs/agents/rules/priors/
-# workflows belong to an environment. Standard (mode) envs cannot be deleted.
+# A sandbox contains many environments, each scoped by a mode (simulation |
+# preview | production). The 3 modes are the standard environments (exactly one
+# production env per sandbox); each simulation run is its own simulation-mode
+# environment (with simulation_id) nested inside its parent env via
+# parent_environment_id. Orgs/agents/rules/priors/workflows belong to an
+# environment. Standard (mode) envs cannot be deleted.
 cmd_environment() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id="" kind="" name="" simulation_id=""
+  local sandbox_id="" mode="" name="" simulation_id=""
   local positionals=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --sandbox-id) sandbox_id="${2:-}"; shift 2 ;;
       --sandbox-id=*) sandbox_id="${1#--sandbox-id=}"; shift ;;
-      --kind) kind="${2:-}"; shift 2 ;;
-      --kind=*) kind="${1#--kind=}"; shift ;;
+      --mode) mode="${2:-}"; shift 2 ;;
+      --mode=*) mode="${1#--mode=}"; shift ;;
       --name) name="${2:-}"; shift 2 ;;
       --name=*) name="${1#--name=}"; shift ;;
       --simulation-id) simulation_id="${2:-}"; shift 2 ;;
@@ -1267,16 +1268,16 @@ cmd_environment() {
       local resp
       resp=$(api_request GET "/environments?sandbox_id=${sid}") || return 1
       if command -v jq &>/dev/null; then
-        echo "$resp" | jq -r '.[] | "  \(if .active then "*" else " " end) \(.kind)\t\(.name)\(if .kind == "simulation-run" then "  (parent: \(.parent_environment_id // "-"))" else "" end)"'
+        echo "$resp" | jq -r '.[] | "  \(if .active then "*" else " " end) \(.mode)\t\(.name)\(if .parent_environment_id then "  (parent: \(.parent_environment_id))" else "" end)"'
       else
         echo "$resp"
       fi
       ;;
     create)
-      [ -z "$kind" ] && die "Missing --kind (simulation|development|preview|production|simulation-run)"
+      [ -z "$mode" ] && die "Missing --mode (simulation|preview|production)"
       local sid; sid=$(resolve_sandbox_id "$sandbox_id")
       [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      local body="{\"sandbox_id\":\"${sid}\",\"kind\":\"${kind}\""
+      local body="{\"sandbox_id\":\"${sid}\",\"mode\":\"${mode}\""
       [ -n "$name" ] && body="${body},\"name\":\"${name}\""
       [ -n "$simulation_id" ] && body="${body},\"simulation_id\":\"${simulation_id}\""
       body="${body}}"
@@ -1297,10 +1298,10 @@ cmd_environment() {
 Usage: kredit environment <list|create|get|delete>   (alias: env)
 
   kredit environment list [--sandbox-id=ID]
-      list a sandbox's environments (kind, name, active *); simulation-run
-      envs also show their parent mode environment
-  kredit environment create --kind=KIND [--name=NAME] [--sandbox-id=ID]
-      KIND: simulation | development | preview | production | simulation-run
+      list a sandbox's environments (mode, name, active *); simulation run
+      envs (mode simulation with a parent) also show their parent environment
+  kredit environment create --mode=MODE [--name=NAME] [--sandbox-id=ID] [--simulation-id=ID]
+      MODE: simulation | preview | production
   kredit environment get <id>
   kredit environment delete <id>
       (standard mode environments cannot be deleted)
@@ -1395,7 +1396,7 @@ Usage:
 Commands:
   login       Authenticate and create an API key
   logout      Remove saved API key
-  init        kredit init sandbox development <name> — create a sandbox
+  init        kredit init sandbox simulation <name> — create a sandbox
   sandbox     Manage sandboxes (create/copy/promote/versions/switch)
   simulation  Live or predictive simulation on a sandbox (live | predictive)
   action      Dry-run the trust layer (action intent)
@@ -1417,11 +1418,12 @@ Commands:
 
 Modes:
   Sandboxes carry a mode per fleet/rule scope. Fresh sandboxes land in
-  `simulation`. Promote order: simulation → development → preview → production.
+  `simulation`. Promote order: simulation → preview → production.
   orgs/agents (list, create), rules add, and check accept an optional --mode.
   `kredit sandbox deploy` copies one mode's fleet/rules into another.
   orgs/agents/priors/workflow (list, create/set) also accept an optional
-  --environment-id (alias --env-id) — the canonical scope; `mode` is legacy.
+  --environment-id (alias --env-id) — the canonical scope; --mode scopes by
+  mode name when no environment id is given.
 
 Options:
   --help      Show help for a command
@@ -1432,21 +1434,21 @@ Examples:
   kredit check --agent-id=agt_8f3k2m --action=openai.chat --estimated-cost=1 --mode=production
   kredit run openai.chat --agent agt_8f3k2m --cost 1 --type api_call
   kredit report --transaction-id=txn_abc --outcome=success --actual-cost=1
-  kredit agents list --org-id=org_123 --mode=development
+  kredit agents list --org-id=org_123 --mode=simulation
   kredit agents create --org-name=research-team --name=bot-01 --mode=preview
   kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100 --hourly-rate-limit=50 --mode=production
   kredit orgs list --mode=simulation
   kredit orgs create --name=research-team
   kredit score --agent-id=agt_8f3k2m
   kredit wallet --agent-id=agt_8f3k2m
-  kredit sandbox deploy simulation development --include=orgs,agents,rules --sandbox-id=sbx_123
+  kredit sandbox deploy simulation preview --include=orgs,agents,rules --sandbox-id=sbx_123
   kredit priors presets
   kredit priors set --name=web-search --frequency-mean=6 --cost-mean=3 --seasonality-preset=weekday --sandbox-id=sbx_123
   kredit priors list --sandbox-id=sbx_123
   kredit workflow create --name=demo --graph='{"nodes":[{"id":"n1","type":"llm"}],"edges":[]}' --sandbox-id=sbx_123
   kredit workflow run wf_123 --seed=5
   kredit environment list --sandbox-id=sbx_123
-  kredit environment create --kind=simulation-run --name=exp-a --sandbox-id=sbx_123
+  kredit environment create --mode=simulation --name=exp-a --sandbox-id=sbx_123
   kredit chat list --sandbox-id=sbx_123
   kredit chat get cht_123
 

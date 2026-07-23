@@ -190,7 +190,7 @@ export const EnvironmentSchema = z.object({
 	id: z.string(),
 	sandbox_id: z.string(),
 	user_id: z.string().default(""),
-	kind: z.string(), // simulation | development | preview | production | simulation-run
+	mode: z.string(), // simulation | preview | production
 	name: z.string().default(""),
 	simulation_id: z.string().nullish(),
 	parent_environment_id: z.string().nullish(),

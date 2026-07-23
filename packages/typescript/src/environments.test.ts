@@ -13,8 +13,8 @@ const SAMPLE_ENV = {
 	id: "e1",
 	sandbox_id: "sb1",
 	user_id: "u1",
-	kind: "development",
-	name: "Development",
+	mode: "preview",
+	name: "Preview",
 	simulation_id: null,
 	parent_environment_id: null,
 	active: true,
@@ -34,18 +34,18 @@ describe("environments", () => {
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValue(mockResponse([SAMPLE_ENV]));
 		const envs = await client.environments.list("sb1");
-		expect(envs[0].kind).toBe("development");
+		expect(envs[0].mode).toBe("preview");
 		const url = fetchMock.mock.calls[0][0] as string;
 		expect(url).toContain("/environments?");
 		expect(url).toContain("sandbox_id=sb1");
 	});
 
-	it("create sends sandbox_id, kind, and simulation_id in the body", async () => {
+	it("create sends sandbox_id, mode, and simulation_id in the body", async () => {
 		const fetchMock = vi
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValue(mockResponse(SAMPLE_ENV));
 		await client.environments.create("sb1", {
-			kind: "simulation-run",
+			mode: "simulation",
 			name: "Run 1",
 			simulationId: "sim1",
 		});
@@ -54,7 +54,7 @@ describe("environments", () => {
 		expect(url).not.toContain("?");
 		const body = JSON.parse(init.body as string);
 		expect(body.sandbox_id).toBe("sb1");
-		expect(body.kind).toBe("simulation-run");
+		expect(body.mode).toBe("simulation");
 		expect(body.name).toBe("Run 1");
 		expect(body.simulation_id).toBe("sim1");
 	});

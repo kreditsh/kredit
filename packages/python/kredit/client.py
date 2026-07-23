@@ -267,7 +267,7 @@ class _SandboxesMixin:
         return self._client._request("GET", "/sandboxes")
 
     def create(self, *, name: str, config: dict | None = None) -> dict:
-        """Create a named dev sandbox."""
+        """Create a named sandbox (starts in simulation mode)."""
         body: dict[str, Any] = {"name": name}
         if config is not None:
             body["config"] = config
@@ -291,11 +291,11 @@ class _SandboxesMixin:
         self._client._request("DELETE", f"/sandboxes/{sandbox_id}")
 
     def copy(self, *, sandbox_id: str, name: str) -> dict:
-        """Clone a sandbox's config into a new named dev sandbox."""
+        """Clone a sandbox's config into a new named sandbox."""
         return self._client._request("POST", f"/sandboxes/{sandbox_id}/copy", json={"name": name})
 
     def promote_preview(self, *, sandbox_id: str) -> dict:
-        """Copy a dev sandbox's config to the preview environment."""
+        """Copy a simulation sandbox's config to the preview environment."""
         return self._client._request("POST", f"/sandboxes/{sandbox_id}/promote/preview")
 
     def promote_production(self, *, preview_sandbox_id: str) -> dict:
@@ -635,8 +635,10 @@ class _WorkflowsMixin:
 class _EnvironmentsMixin:
     """Environment methods, bound to a Kredit client instance.
 
-    A sandbox contains environments: the 4 modes are standard environments and
-    each simulation is its own environment nested inside its parent mode. On
+    A sandbox contains environments: the 3 modes (simulation, preview,
+    production) are standard environments — a sandbox has exactly one
+    production environment — and each simulation run is an environment with
+    mode "simulation" nested inside its parent environment. On
     :meth:`list` and :meth:`create`, ``sandbox_id`` is passed as a query
     parameter and JSON body field respectively.
     """
@@ -645,7 +647,7 @@ class _EnvironmentsMixin:
         self._client = client
 
     def list(self, *, sandbox_id: str) -> list[Environment]:
-        """List environments for a sandbox (lazily provisions the 4 standard envs).
+        """List environments for a sandbox (lazily provisions the standard envs).
 
         ``sandbox_id`` is passed as a query parameter.
         """
@@ -658,17 +660,17 @@ class _EnvironmentsMixin:
         self,
         *,
         sandbox_id: str,
-        kind: str,
+        mode: str,
         name: str | None = None,
         simulation_id: str | None = None,
     ) -> Environment:
         """Create an environment in a sandbox.
 
-        ``kind`` is one of ``simulation``, ``development``, ``preview``,
-        ``production``, or ``simulation-run``. ``sandbox_id`` is sent in the
-        JSON body.
+        ``mode`` is one of ``simulation``, ``preview``, or ``production``.
+        Pass ``simulation_id`` to bind a simulation-mode environment to a
+        simulation run. ``sandbox_id`` is sent in the JSON body.
         """
-        body: dict[str, Any] = {"sandbox_id": sandbox_id, "kind": kind}
+        body: dict[str, Any] = {"sandbox_id": sandbox_id, "mode": mode}
         if name is not None:
             body["name"] = name
         if simulation_id is not None:
@@ -1058,7 +1060,7 @@ class Kredit:
 
         Args:
             mode: Optional mode to scope the overview
-                ("simulation", "development", "preview", or "production").
+                ("simulation", "preview", or "production").
             environment_id: Optional environment to scope the overview.
 
         Returns:

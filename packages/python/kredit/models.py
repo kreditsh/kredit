@@ -224,13 +224,14 @@ class Workflow(BaseModel):
 class Environment(BaseModel):
     """An environment within a sandbox.
 
-    The 4 modes are standard environments; each simulation is its own
-    environment nested inside its parent mode environment.
+    The 3 modes are standard environments (a sandbox has exactly one
+    production environment); a simulation run/clone is an environment with
+    mode "simulation" plus `simulation_id`/`parent_environment_id`.
     """
     id: str
     sandbox_id: str
     user_id: str = ""
-    kind: str = ""  # simulation | development | preview | production | simulation-run
+    mode: str = ""  # simulation | preview | production
     name: str = ""
     simulation_id: str | None = None
     parent_environment_id: str | None = None

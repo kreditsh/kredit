@@ -181,11 +181,11 @@ describe("KreditAPI", () => {
 			vi.stubGlobal("fetch", fetchMock);
 
 			const api = new KreditAPI(config);
-			await api.listOrgs("development", "env_3");
+			await api.listOrgs("preview", "env_3");
 
 			const [url] = fetchMock.mock.calls[0];
 			expect(url).toBe(
-				"https://api.kredit.sh/orgs?mode=development&environment_id=env_3",
+				"https://api.kredit.sh/orgs?mode=preview&environment_id=env_3",
 			);
 		});
 	});
@@ -564,14 +564,14 @@ describe("KreditAPI", () => {
 
 	describe("createEnvironment", () => {
 		it("sends POST /environments with body", async () => {
-			const body = { id: "env_1", kind: "simulation" };
+			const body = { id: "env_1", mode: "simulation" };
 			const fetchMock = mockFetch(body, 201);
 			vi.stubGlobal("fetch", fetchMock);
 
 			const api = new KreditAPI(config);
 			const result = await api.createEnvironment({
 				sandbox_id: "sbx_1",
-				kind: "simulation",
+				mode: "simulation",
 				simulation_id: "sim_1",
 			});
 
@@ -582,7 +582,7 @@ describe("KreditAPI", () => {
 			expect(opts.method).toBe("POST");
 			expect(JSON.parse(opts.body)).toEqual({
 				sandbox_id: "sbx_1",
-				kind: "simulation",
+				mode: "simulation",
 				simulation_id: "sim_1",
 			});
 		});
@@ -653,7 +653,7 @@ describe("KreditAPI", () => {
 			const api = new KreditAPI(config);
 			const result = await api.createChat({
 				sandbox_id: "sbx_1",
-				mode: "development",
+				mode: "simulation",
 				title: "hello",
 			});
 
@@ -664,7 +664,7 @@ describe("KreditAPI", () => {
 			expect(opts.method).toBe("POST");
 			expect(JSON.parse(opts.body)).toEqual({
 				sandbox_id: "sbx_1",
-				mode: "development",
+				mode: "simulation",
 				title: "hello",
 			});
 		});
