@@ -726,6 +726,129 @@ H
   esac
 }
 
+# Open a URL in the user's default browser (best-effort; prints it otherwise).
+open_url() {
+  local url="$1"
+  if command -v open &>/dev/null; then open "$url" >/dev/null 2>&1
+  elif command -v xdg-open &>/dev/null; then xdg-open "$url" >/dev/null 2>&1
+  else echo "  open in your browser: $url"; fi
+}
+
+# `kredit simulation live` with no --sandbox-id: walk the real hierarchy —
+# sandbox init → simulation environment → a pilot fleet (org + agents + guardrail
+# rules) scoped into that environment, plus a pilot simulation (itself a nested
+# environment). Then open the simulation environment in the dashboard.
+bootstrap_and_pilot() {
+  require_api_key
+  echo ""
+  echo "  No --sandbox-id given — bootstrapping a fresh pilot..."
+
+  # 1) sandbox init — creates the sandbox and provisions its three standard
+  #    environments (simulation / preview / production). Name is unique per run.
+  local sb_resp sandbox_id sb_name
+  sb_name="Pilot $(date +%y%m%d-%H%M%S)"
+  sb_resp=$(curl -s -X POST "${BASE_URL}/sandboxes" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -H "User-Agent: kredit-cli/${VERSION}" \
+    -d "{\"name\":\"${sb_name}\"}" 2>/dev/null)
+  sandbox_id=$(printf '%s' "$sb_resp" | jq -r '.id // ._id // empty' 2>/dev/null)
+  [ -z "$sandbox_id" ] && die "Failed to create sandbox: $sb_resp"
+  echo "  ✓ sandbox        ${sandbox_id}"
+
+  # 2) environment init — the sandbox's standard simulation environment (mode
+  #    simulation, no parent/sim id). This is where the fleet lives and where
+  #    every simulation run nests as its own child environment.
+  local env_resp env_id
+  env_resp=$(curl -s "${BASE_URL}/environments?sandbox_id=${sandbox_id}" \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "User-Agent: kredit-cli/${VERSION}" 2>/dev/null)
+  env_id=$(printf '%s' "$env_resp" | jq -r \
+    '[.[] | select(.mode=="simulation" and (.simulation_id==null) and (.parent_environment_id==null))][0].id // empty' 2>/dev/null)
+  [ -z "$env_id" ] && die "Failed to resolve simulation environment: $env_resp"
+  echo "  ✓ environment    ${env_id} (simulation)"
+
+  # 3) pilot — an org and 10 agents, with guardrail rules, scoped INTO that
+  #    environment (the fleet the simulation runs)
+  local pilot_resp org_id n_agents rules
+  pilot_resp=$(curl -s -X POST "${BASE_URL}/sandboxes/${sandbox_id}/pilot" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -H "User-Agent: kredit-cli/${VERSION}" \
+    -d "{\"environment_id\":\"${env_id}\",\"agent_count\":10}" 2>/dev/null)
+  org_id=$(printf '%s'   "$pilot_resp" | jq -r '.org_id // empty' 2>/dev/null)
+  n_agents=$(printf '%s' "$pilot_resp" | jq -r '(.agent_ids | length) // 0' 2>/dev/null)
+  rules=$(printf '%s'    "$pilot_resp" | jq -r '.rules_added // 0' 2>/dev/null)
+  [ -z "$org_id" ] && die "Pilot failed: $pilot_resp"
+  echo "  ✓ org            ${org_id}"
+  echo "  ✓ fleet          ${n_agents} agents + ${rules} guardrail rules"
+
+  # 4) live simulation — REAL transactions through the kredit cycle, streamed
+  #    into the sim's own environment. This is what the action audit and spend
+  #    charts render. stream:true returns the id immediately.
+  local livesim_resp livesim_id livesim_env
+  livesim_resp=$(curl -s -X POST "${BASE_URL}/simulations/run" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -H "User-Agent: kredit-cli/${VERSION}" \
+    -d "{\"sandbox_id\":\"${sandbox_id}\",\"environment_id\":\"${env_id}\",\"mode\":\"realtime\",\"duration_sec\":120,\"seed\":42,\"stream\":true}" 2>/dev/null)
+  livesim_id=$(printf '%s' "$livesim_resp" | jq -r '.id // empty' 2>/dev/null)
+  [ -z "$livesim_id" ] && die "Failed to start live simulation: $livesim_resp"
+  livesim_env=$(printf '%s' "$livesim_resp" | jq -r '.environment_id // empty' 2>/dev/null)
+  # the run's own env may be provisioned a beat after the id — fetch it if absent
+  if [ -z "$livesim_env" ]; then
+    livesim_env=$(curl -s "${BASE_URL}/simulations/${livesim_id}" \
+      -H "Authorization: Bearer ${API_KEY}" 2>/dev/null | jq -r '.environment_id // empty' 2>/dev/null)
+  fi
+  [ -z "$livesim_env" ] && livesim_env="$env_id"
+  echo "  ✓ live sim       ${livesim_id} (streaming into its environment)"
+
+  # 5) open the live simulation's environment — action audit + spend charts
+  #    populate here as decisions stream in
+  local url="${DASHBOARD_URL}/platform/environments/${livesim_env}"
+  echo ""
+  echo "  → ${url}"
+  open_url "$url"
+  echo ""
+}
+
+# kredit pilot — one call: create a fresh sandbox, seed a fleet, run a pilot
+# simulation, and open its environment in the dashboard. No --sandbox-id needed.
+cmd_pilot() {
+  require_api_key
+  local agent_count=10 integrations=""
+  for arg in "$@"; do
+    case "$arg" in
+      --agents=*|--agent-count=*) agent_count="${arg#*=}" ;;
+      --integrations=*) integrations="${arg#--integrations=}" ;;
+      --help) echo "Usage: kredit pilot [--agents=N] [--integrations=stripe,visa,...]"; return 0 ;;
+      --*) die "Unknown argument: $arg" ;;
+    esac
+  done
+  echo ""
+  echo "  Bootstrapping a fresh pilot — sandbox + ${agent_count}-agent fleet..."
+  local body
+  if [ -n "$integrations" ]; then
+    local integs_json
+    integs_json=$(printf '%s' "$integrations" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"",(i>1?",":""),$i} printf "]"}')
+    body="{\"agent_count\":${agent_count},\"integrations\":${integs_json}}"
+  else
+    body="{\"agent_count\":${agent_count}}"
+  fi
+  local resp env_id sim_id n_agents
+  resp=$(curl -s -X POST "${BASE_URL}/pilot" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -H "User-Agent: kredit-cli/${VERSION}" -d "$body" 2>/dev/null)
+  env_id=$(printf '%s' "$resp" | jq -r '.environment_id // empty' 2>/dev/null)
+  sim_id=$(printf '%s' "$resp" | jq -r '.simulation_id // empty' 2>/dev/null)
+  n_agents=$(printf '%s' "$resp" | jq -r '(.agent_ids | length) // 0' 2>/dev/null)
+  [ -z "$env_id" ] && die "Pilot failed: $resp"
+  echo "  ✓ fleet          ${n_agents} agents"
+  echo "  ✓ pilot sim      ${sim_id}"
+  local url="${DASHBOARD_URL}/platform/environments/${env_id}"
+  echo ""
+  echo "  → ${url}"
+  open_url "$url"
+  echo ""
+}
+
 cmd_sim() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
   local sandbox_id="" mode="predictive" period="1mo" duration="60" budget="0" seed="42" args=""
@@ -750,8 +873,13 @@ cmd_sim() {
   case "$subcmd" in
     live|"")
       # the full live run: a streamed server run through the kredit cycle.
-      [ -z "$sandbox_id" ] && die "Missing --sandbox-id (create one with 'kredit init' and add agents first)"
-      cmd_simulation "$sandbox_id" "$duration" "$seed" ;;
+      # No --sandbox-id → stand up a fresh sandbox + org + agents + rules, run a
+      # pilot, and open the run's environment in the dashboard.
+      if [ -z "$sandbox_id" ]; then
+        bootstrap_and_pilot
+      else
+        cmd_simulation "$sandbox_id" "$duration" "$seed"
+      fi ;;
     stop)
       local sid="${positionals[0]:-$sandbox_id}"
       [ -z "$sid" ] && die "Usage: kredit simulation stop <simulation_id>"
@@ -774,7 +902,8 @@ Usage: kredit simulation [subcommand]
   (none) | live [--sandbox-id=ID]
         run the live simulation — real transactions through the kredit cycle
         (intent → identity → trust → execute → observe → optimize).
-        Without --sandbox-id a new sandbox (in simulation mode) is created first.
+        Without --sandbox-id: bootstrap a fresh sandbox + org + agents +
+        guardrail rules, run a pilot, and open the environment in the dashboard.
   predictive --sandbox-id=ID [--period=1d|1wk|2wk|1mo|1quarter|1year] [--seed=N]
         project the sandbox's fleet over a horizon with weekly guardrail optimization
   run  --sandbox-id=ID [--mode=predictive|live] [--period=1mo] [--duration=60] [--seed=N]
@@ -1536,8 +1665,8 @@ main() {
     login)    cmd_login "$@" ;;
     logout)   cmd_logout "$@" ;;
     init)     cmd_init "$@" ;;
+    pilot)    cmd_pilot "$@" ;;
     simulation) cmd_sim "$@" ;;
-    demo)     cmd_simulation "$@" ;;  # legacy alias for `kredit simulation live`
     check)    cmd_check "$@" ;;
     run)      cmd_run "$@" ;;
     report)   cmd_report "$@" ;;

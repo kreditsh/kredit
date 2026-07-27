@@ -977,6 +977,33 @@ class Kredit:
 
     # ----- Top-level convenience methods -----
 
+    def pilot(
+        self,
+        *,
+        agent_count: int = 10,
+        integrations: list[str] | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Run a pilot in one call: create a fresh sandbox, seed a fleet of
+        ``agent_count`` agents with guardrails, and run a pilot simulation.
+
+        No sandbox id required.
+
+        Args:
+            agent_count: How many agents to seed in the fleet (default 10).
+            integrations: Provider ids the fleet may use (default: all).
+            name: Optional sandbox name (a unique one is generated when omitted).
+
+        Returns:
+            The created sandbox id, fleet ids, and the simulation's environment id.
+        """
+        body: dict[str, Any] = {"agent_count": agent_count}
+        if integrations is not None:
+            body["integrations"] = integrations
+        if name is not None:
+            body["name"] = name
+        return self._request("POST", "/pilot", json=body)
+
     def check(
         self,
         *,

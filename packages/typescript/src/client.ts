@@ -1056,6 +1056,25 @@ export class Kredit {
 		return body;
 	}
 
+	/**
+	 * Run a pilot in one call: create a fresh sandbox, seed a fleet of
+	 * `agentCount` agents with guardrails, and run a pilot simulation. No
+	 * sandbox id required. Returns the created ids + the simulation's
+	 * environment id.
+	 */
+	async pilot(params?: {
+		agentCount?: number;
+		integrations?: string[];
+		name?: string;
+	}): Promise<any> {
+		const body: Record<string, unknown> = {
+			agent_count: params?.agentCount ?? 10,
+		};
+		if (params?.integrations) body.integrations = params.integrations;
+		if (params?.name !== undefined) body.name = params.name;
+		return this._request("POST", "/pilot", { body });
+	}
+
 	/** Run a risk check before executing an action. Hot path -- kept minimal. */
 	async check(params: {
 		agentId: string;
