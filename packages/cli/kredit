@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.9.0"
 
 # ── Config resolution ────────────────────────────────────────────────────────
 
@@ -58,31 +58,32 @@ require_api_key() {
   fi
 }
 
-# Resolve the target sandbox id for sandbox-scoped commands (e.g. priors):
-#   1) an explicit --sandbox-id flag (passed as $1)
-#   2) KREDIT_SANDBOX_ID env var
-#   3) sandbox_id=... in ~/.kredit/config
-resolve_sandbox_id() {
+# Resolve the target organization id for org-scoped commands:
+#   1) an explicit --org-id flag (passed as $1)
+#   2) KREDIT_ORG_ID env var
+#   3) org_id=... in ~/.kredit/config (written by `kredit org activate`)
+# Empty is fine — the server falls back to the ACTIVATED organization.
+resolve_org_id() {
   if [ -n "${1:-}" ]; then
     echo "$1"
     return
   fi
-  if [ -n "${KREDIT_SANDBOX_ID:-}" ]; then
-    echo "$KREDIT_SANDBOX_ID"
+  if [ -n "${KREDIT_ORG_ID:-}" ]; then
+    echo "$KREDIT_ORG_ID"
     return
   fi
   local config_file="${HOME:-$(eval echo ~)}/.kredit/config"
   if [ -f "$config_file" ]; then
-    grep -E '^(sandbox_id|KREDIT_SANDBOX_ID)=' "$config_file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' '
+    grep -E '^(org_id|KREDIT_ORG_ID)=' "$config_file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' '
   fi
 }
 
-# Modes in promote order: simulation → preview → production.
-# Fresh sandboxes land in `simulation`.
+# Environment modes: sandbox → preview → production.
+# Every organization has one standard environment per mode.
 validate_mode() {
   case "$1" in
-    simulation|preview|production) ;;
-    *) die "Invalid --mode: $1. Valid values: simulation, preview, production" ;;
+    sandbox|preview|production) ;;
+    *) die "Invalid --mode: $1. Valid values: sandbox, preview, production" ;;
   esac
 }
 
@@ -276,81 +277,6 @@ server.serve_forever()
   echo "Key: ${api_key}"
   echo ""
   echo "You're ready to go. Try: kredit orgs create --name=my-team"
-}
-
-# Live realtime simulation. The server owns the engine now — there is no local
-# generation. We just start a streaming run and render each action the server
-# emits over SSE. Ctrl-C stops the server-side run cleanly.
-cmd_simulation() {
-  require_api_key
-
-  local sandbox_id="${1:-}" duration="${2:-60}" seed="${3:-42}"
-
-  # Relax strict mode — a single curl/jq hiccup must not kill the stream.
-  set +e
-  set +u
-  set +o pipefail
-
-  # Kick off a realtime, streaming run. duration_sec:0 runs live-to-infinity
-  # until stopped. With stream:true the server returns immediately with the id.
-  local body="{\"sandbox_id\":\"${sandbox_id}\",\"mode\":\"realtime\",\"duration_sec\":${duration},\"seed\":${seed},\"stream\":true}"
-  local resp sim_id
-  resp=$(curl -s -X POST "${BASE_URL}/simulations/run" \
-    -H "Authorization: Bearer ${API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d "$body" 2>/dev/null)
-  sim_id=$(echo "$resp" | jq -r '.id // empty' 2>/dev/null)
-  [ -z "$sim_id" ] && die "Failed to start simulation: $resp"
-
-  # Ctrl-C (or TERM) → stop the server-side run, then leave.
-  trap 'echo ""; curl -s -X POST "${BASE_URL}/simulations/${sim_id}/stop" -H "Authorization: Bearer ${API_KEY}" >/dev/null 2>&1; echo "  stopped simulation ${sim_id}"; exit 0' INT TERM
-
-  local horizon="${duration}s"
-  [ "$duration" = "0" ] && horizon="live (until stopped)"
-  echo ""
-  echo "  simulation ${sim_id} — realtime, duration=${horizon}"
-  echo "  streaming actions (Ctrl-C to stop)..."
-  echo ""
-  printf "  %-18s %-24s %10s   %-8s  %s\n" "AGENT" "ACTION" "COST" "STATUS" "REASON"
-  echo "  ---------------------------------------------------------------------------------"
-
-  # Stream Server-Sent Events. Each line is `data: {json}`; render `action`
-  # events, stop on the terminal `done` event, ignore `ping`s. Keep the auth
-  # header on the streaming curl.
-  curl -sN "${BASE_URL}/simulations/${sim_id}/stream" \
-    -H "Authorization: Bearer ${API_KEY}" \
-    -H "User-Agent: kredit-cli/${VERSION}" \
-  | while IFS= read -r line; do
-      case "$line" in
-        data:*) ;;
-        *) continue ;;
-      esac
-      local json="${line#data:}"
-      json="${json# }"
-      local type
-      type=$(printf '%s' "$json" | jq -r '.type // empty' 2>/dev/null)
-      case "$type" in
-        action)
-          local agent action cost status reason
-          agent=$(printf '%s'  "$json" | jq -r '.action.agent_name // "-"' 2>/dev/null)
-          action=$(printf '%s' "$json" | jq -r '.action.action // "-"' 2>/dev/null)
-          cost=$(printf '%s'   "$json" | jq -r '.action.cost // 0' 2>/dev/null)
-          status=$(printf '%s' "$json" | jq -r '.action.card.status // "-"' 2>/dev/null)
-          reason=$(printf '%s' "$json" | jq -r '.action.card.block_reason // ""' 2>/dev/null)
-          printf "  %-18s %-24s \$%9s   %-8s  %s\n" \
-            "$agent" "$action" "$cost" "$status" "$reason"
-          ;;
-        done)
-          local total
-          total=$(printf '%s' "$json" | jq -r '.total_actions // 0' 2>/dev/null)
-          echo "  ---------------------------------------------------------------------------------"
-          echo ""
-          echo "  done - total actions: ${total}"
-          echo ""
-          break
-          ;;
-      esac
-    done
 }
 
 cmd_logout() {
@@ -554,63 +480,88 @@ cmd_agents() {
   esac
 }
 
+# Organizations are the top level: they own agents, environments, workflows and
+# rules. `activate` points the API (and this CLI) at one org by default.
 cmd_orgs() {
-  local subcmd="${1:-}"
-  shift 2>/dev/null || true
-
+  local subcmd="${1:-}"; shift 2>/dev/null || true
+  local name="" version=""
+  local positionals=()
+  for arg in "$@"; do
+    case "$arg" in
+      --name=*) name="${arg#--name=}" ;;
+      --version=*) version="${arg#--version=}" ;;
+      --help) subcmd="help" ;;
+      --*) die "Unknown argument: $arg" ;;
+      *) positionals+=("$arg") ;;
+    esac
+  done
+  local id="${positionals[0]:-}"
   case "$subcmd" in
-    list)
-      local mode="" environment_id=""
-      for arg in "$@"; do
-        case "$arg" in
-          --mode=*) mode="${arg#--mode=}" ;;
-          --environment-id=*) environment_id="${arg#--environment-id=}" ;;
-          --env-id=*) environment_id="${arg#--env-id=}" ;;
-          --help) echo "Usage: kredit orgs list [--mode=MODE] [--environment-id=ENV_ID]"; return 0 ;;
-          *) die "Unknown argument: $arg" ;;
-        esac
-      done
-      [ -n "$mode" ] && validate_mode "$mode"
-      local query=""
-      [ -n "$mode" ] && query="${query}&mode=${mode}"
-      [ -n "$environment_id" ] && query="${query}&environment_id=${environment_id}"
-      if [ -n "$query" ]; then
-        api_request GET "/orgs?${query#&}"
+    list|"")
+      local resp
+      resp=$(api_request GET "/orgs") || return 1
+      if command -v jq &>/dev/null; then
+        echo "$resp" | jq -r '.[] | "  \(if .active then "*" else " " end) \(.id)  \(.name)"'
       else
-        api_request GET "/orgs"
+        echo "$resp"
       fi
       ;;
     create)
-      local name="" mode="" environment_id=""
-      for arg in "$@"; do
-        case "$arg" in
-          --name=*) name="${arg#--name=}" ;;
-          --mode=*) mode="${arg#--mode=}" ;;
-          --environment-id=*) environment_id="${arg#--environment-id=}" ;;
-          --env-id=*) environment_id="${arg#--env-id=}" ;;
-          --help) echo "Usage: kredit orgs create --name=ORG_NAME [--mode=MODE] [--environment-id=ENV_ID]"; return 0 ;;
-          *) die "Unknown argument: $arg" ;;
-        esac
-      done
+      [ -z "$name" ] && name="$id"
+      [ -z "$name" ] && die "Usage: kredit org create <name>"
+      api_request POST "/orgs" "{\"name\":\"${name}\"}"
+      ;;
+    get)
+      [ -z "$id" ] && id=$(resolve_org_id "")
+      [ -z "$id" ] && die "Usage: kredit org get <id>"
+      api_request GET "/orgs/${id}"
+      ;;
+    activate)
+      [ -z "$id" ] && die "Usage: kredit org activate <id>"
+      api_request POST "/orgs/${id}/activate" > /dev/null || return 1
+      # remember it locally too, so every org-scoped command targets it
+      local home="${HOME:-$(eval echo ~)}"
+      mkdir -p "$home/.kredit"
+      touch "$home/.kredit/config"
+      grep -v '^org_id=' "$home/.kredit/config" > "$home/.kredit/config.tmp" 2>/dev/null || true
+      echo "org_id=${id}" >> "$home/.kredit/config.tmp"
+      mv "$home/.kredit/config.tmp" "$home/.kredit/config"
+      chmod 600 "$home/.kredit/config"
+      echo "  ✓ activated organization ${id}"
+      ;;
+    rename)
+      [ -z "$id" ] && die "Usage: kredit org rename <id> --name=NEW_NAME"
       [ -z "$name" ] && die "Missing --name"
-      local body="{\"name\":\"${name}\""
-      if [ -n "$mode" ]; then validate_mode "$mode"; body="${body},\"mode\":\"${mode}\""; fi
-      [ -n "$environment_id" ] && body="${body},\"environment_id\":\"${environment_id}\""
-      body="${body}}"
-      api_request POST "/orgs" "$body"
+      api_request PUT "/orgs/${id}" "{\"name\":\"${name}\"}"
       ;;
-    --help|help)
-      echo "Usage: kredit orgs <list|create>"
-      echo ""
-      echo "  kredit orgs list [--mode=MODE] [--environment-id=ENV_ID]"
-      echo "  kredit orgs create --name=ORG_NAME [--mode=MODE] [--environment-id=ENV_ID]"
+    delete)
+      [ -z "$id" ] && die "Usage: kredit org delete <id>"
+      api_request DELETE "/orgs/${id}"
       ;;
-    "")
-      die "Missing subcommand. Use: kredit orgs <list|create>"
+    versions)
+      [ -z "$id" ] && id=$(resolve_org_id "")
+      [ -z "$id" ] && die "Usage: kredit org versions <id>"
+      api_request GET "/orgs/${id}/versions"
       ;;
-    *)
-      die "Unknown orgs subcommand: $subcmd"
+    restore)
+      [ -z "$id" ] && die "Usage: kredit org restore <id> --version=N"
+      [ -z "$version" ] && die "Missing --version"
+      api_request POST "/orgs/${id}/restore/${version}"
       ;;
+    help)
+      cat <<'H'
+Usage: kredit org <subcommand>   (alias: orgs)
+  list                      list your organizations (* = activated)
+  create <name>             create an organization (3 standard envs provisioned)
+  get [<id>]                show an organization (defaults to the activated one)
+  activate <id>             point the API + CLI at this organization
+  rename <id> --name=NAME
+  delete <id>               delete the org and EVERYTHING under it
+  versions [<id>]           saved change history
+  restore <id> --version=N  roll back to a version
+H
+      ;;
+    *) die "Unknown org subcommand: $subcmd" ;;
   esac
 }
 
@@ -651,7 +602,7 @@ cmd_wallet() {
   api_request GET "/wallets/${agent_id}"
 }
 
-# ── Control-plane verbs (sandboxes, actions, simulation, verify, optimize) ────
+# ── Control-plane verbs (orgs, actions, simulation, verify, optimize) ────────
 
 # Merge an optional --args='{...}' JSON object into a body's leading "{".
 merge_args() {
@@ -662,70 +613,6 @@ merge_args() {
   echo "${body%\}},${extra}}"
 }
 
-cmd_sandbox() {
-  local subcmd="${1:-}"; shift 2>/dev/null || true
-  local id="" name="" version="" args="" include="" source_sim=""
-  local positionals=()
-  for arg in "$@"; do
-    case "$arg" in
-      --id=*) id="${arg#--id=}" ;;
-      --sandbox-id=*) id="${arg#--sandbox-id=}" ;;
-      --name=*) name="${arg#--name=}" ;;
-      --version=*) version="${arg#--version=}" ;;
-      --args=*) args="${arg#--args=}" ;;
-      --include=*) include="${arg#--include=}" ;;
-      --source-simulation-id=*) source_sim="${arg#--source-simulation-id=}" ;;
-      --help) ;;
-      --*) die "Unknown argument: $arg" ;;
-      *) positionals+=("$arg") ;;
-    esac
-  done
-  case "$subcmd" in
-    list)     api_request GET "/sandboxes" ;;
-    get)      [ -z "$id" ] && die "Missing --id"; api_request GET "/sandboxes/${id}" ;;
-    create)   [ -z "$name" ] && die "Missing --name"
-              api_request POST "/sandboxes" "$(merge_args "{\"name\":\"${name}\"}" "$args")" ;;
-    update)   [ -z "$id" ] && die "Missing --id"
-              api_request PUT "/sandboxes/${id}" "$(merge_args "{\"name\":\"${name}\"}" "$args")" ;;
-    delete)   [ -z "$id" ] && die "Missing --id"; api_request DELETE "/sandboxes/${id}" ;;
-    copy)     [ -z "$id" ] && die "Missing --id"
-              api_request POST "/sandboxes/${id}/copy" "{\"name\":\"${name}\"}" ;;
-    versions) [ -z "$id" ] && die "Missing --id"; api_request GET "/sandboxes/${id}/versions" ;;
-    switch)   [ -z "$id" ] && die "Missing --id"; [ -z "$version" ] && die "Missing --version"
-              api_request POST "/sandboxes/${id}/switch/${version}" ;;
-    promote-preview)    [ -z "$id" ] && die "Missing --id"; api_request POST "/sandboxes/${id}/promote/preview" ;;
-    promote-production) [ -z "$id" ] && die "Missing --id"; api_request POST "/sandboxes/${id}/promote/production" ;;
-    deploy)
-      # Copy a mode's fleet/rules into another mode WITHOUT advancing the active
-      # mode pointer (distinct from promote-*, which only moves the pointer).
-      [ -z "$id" ] && die "Missing --sandbox-id"
-      local from_mode="${positionals[0]:-}" to_mode="${positionals[1]:-}"
-      [ -z "$from_mode" ] && die "Missing <from_mode>. Usage: kredit sandbox deploy <from_mode> <to_mode> [--include=orgs,agents,rules] [--sandbox-id=ID]"
-      [ -z "$to_mode" ] && die "Missing <to_mode>. Usage: kredit sandbox deploy <from_mode> <to_mode> [--include=orgs,agents,rules] [--sandbox-id=ID]"
-      validate_mode "$from_mode"
-      validate_mode "$to_mode"
-      [ -z "$include" ] && include="orgs,agents,rules"
-      local inc_json="[\"$(echo "$include" | sed 's/,/","/g')\"]"
-      local body="{\"from_mode\":\"${from_mode}\",\"to_mode\":\"${to_mode}\",\"include\":${inc_json}"
-      [ -n "$source_sim" ] && body="${body},\"source_simulation_id\":\"${source_sim}\""
-      body="${body}}"
-      api_request POST "/sandboxes/${id}/deploy" "$body" ;;
-    --help|help|"")
-      cat <<'H'
-Usage: kredit sandbox <subcommand>
-  list | get --id=ID | create --name=NAME [--args='{...}']
-  update --id=ID [--name=NAME] [--args='{...}'] | delete --id=ID
-  copy --id=ID --name=NAME | versions --id=ID | switch --id=ID --version=N
-  promote-preview --id=ID | promote-production --id=PREVIEW_ID
-  deploy <from_mode> <to_mode> [--include=orgs,agents,rules] [--sandbox-id=ID] [--source-simulation-id=ID]
-    copy a mode's orgs/agents/rules into another mode (does NOT change the active mode)
-    modes: simulation → preview → production
-H
-      ;;
-    *) die "Unknown sandbox subcommand: $subcmd" ;;
-  esac
-}
-
 # Open a URL in the user's default browser (best-effort; prints it otherwise).
 open_url() {
   local url="$1"
@@ -734,96 +621,143 @@ open_url() {
   else echo "  open in your browser: $url"; fi
 }
 
-# `kredit simulation live` with no --sandbox-id: walk the real hierarchy —
-# sandbox init → simulation environment → a pilot fleet (org + agents + guardrail
-# rules) scoped into that environment, plus a pilot simulation (itself a nested
-# environment). Then open the simulation environment in the dashboard.
-bootstrap_and_pilot() {
-  require_api_key
+# ── The kredit terminal flow ─────────────────────────────────────────────────
+
+# Boxed KREDIT banner with drop shadow + command legend.
+kredit_banner() {
   echo ""
-  echo "  No --sandbox-id given — bootstrapping a fresh pilot..."
-
-  # 1) sandbox init — creates the sandbox and provisions its three standard
-  #    environments (simulation / preview / production). Name is unique per run.
-  local sb_resp sandbox_id sb_name
-  sb_name="Pilot $(date +%y%m%d-%H%M%S)"
-  sb_resp=$(curl -s -X POST "${BASE_URL}/sandboxes" \
-    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
-    -H "User-Agent: kredit-cli/${VERSION}" \
-    -d "{\"name\":\"${sb_name}\"}" 2>/dev/null)
-  sandbox_id=$(printf '%s' "$sb_resp" | jq -r '.id // ._id // empty' 2>/dev/null)
-  [ -z "$sandbox_id" ] && die "Failed to create sandbox: $sb_resp"
-  echo "  ✓ sandbox        ${sandbox_id}"
-
-  # 2) environment init — the sandbox's standard simulation environment (mode
-  #    simulation, no parent/sim id). This is where the fleet lives and where
-  #    every simulation run nests as its own child environment.
-  local env_resp env_id
-  env_resp=$(curl -s "${BASE_URL}/environments?sandbox_id=${sandbox_id}" \
-    -H "Authorization: Bearer ${API_KEY}" \
-    -H "User-Agent: kredit-cli/${VERSION}" 2>/dev/null)
-  env_id=$(printf '%s' "$env_resp" | jq -r \
-    '[.[] | select(.mode=="simulation" and (.simulation_id==null) and (.parent_environment_id==null))][0].id // empty' 2>/dev/null)
-  [ -z "$env_id" ] && die "Failed to resolve simulation environment: $env_resp"
-  echo "  ✓ environment    ${env_id} (simulation)"
-
-  # 3) pilot — an org and 10 agents, with guardrail rules, scoped INTO that
-  #    environment (the fleet the simulation runs)
-  local pilot_resp org_id n_agents rules
-  pilot_resp=$(curl -s -X POST "${BASE_URL}/sandboxes/${sandbox_id}/pilot" \
-    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
-    -H "User-Agent: kredit-cli/${VERSION}" \
-    -d "{\"environment_id\":\"${env_id}\",\"agent_count\":10}" 2>/dev/null)
-  org_id=$(printf '%s'   "$pilot_resp" | jq -r '.org_id // empty' 2>/dev/null)
-  n_agents=$(printf '%s' "$pilot_resp" | jq -r '(.agent_ids | length) // 0' 2>/dev/null)
-  rules=$(printf '%s'    "$pilot_resp" | jq -r '.rules_added // 0' 2>/dev/null)
-  [ -z "$org_id" ] && die "Pilot failed: $pilot_resp"
-  echo "  ✓ org            ${org_id}"
-  echo "  ✓ fleet          ${n_agents} agents + ${rules} guardrail rules"
-
-  # 4) live simulation — REAL transactions through the kredit cycle, streamed
-  #    into the sim's own environment. This is what the action audit and spend
-  #    charts render. stream:true returns the id immediately.
-  local livesim_resp livesim_id livesim_env
-  livesim_resp=$(curl -s -X POST "${BASE_URL}/simulations/run" \
-    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
-    -H "User-Agent: kredit-cli/${VERSION}" \
-    -d "{\"sandbox_id\":\"${sandbox_id}\",\"environment_id\":\"${env_id}\",\"mode\":\"realtime\",\"duration_sec\":120,\"seed\":42,\"stream\":true}" 2>/dev/null)
-  livesim_id=$(printf '%s' "$livesim_resp" | jq -r '.id // empty' 2>/dev/null)
-  [ -z "$livesim_id" ] && die "Failed to start live simulation: $livesim_resp"
-  livesim_env=$(printf '%s' "$livesim_resp" | jq -r '.environment_id // empty' 2>/dev/null)
-  # the run's own env may be provisioned a beat after the id — fetch it if absent
-  if [ -z "$livesim_env" ]; then
-    livesim_env=$(curl -s "${BASE_URL}/simulations/${livesim_id}" \
-      -H "Authorization: Bearer ${API_KEY}" 2>/dev/null | jq -r '.environment_id // empty' 2>/dev/null)
-  fi
-  [ -z "$livesim_env" ] && livesim_env="$env_id"
-  echo "  ✓ live sim       ${livesim_id} (streaming into its environment)"
-
-  # 5) open the live simulation's environment — action audit + spend charts
-  #    populate here as decisions stream in
-  local url="${DASHBOARD_URL}/platform/environments/${livesim_env}"
-  echo ""
-  echo "  → ${url}"
-  open_url "$url"
+  echo "  ╔═════════════════════════════════════════════════════════════════════════╗"
+  echo "  ║  ██░     ██░ ████████░   ██████████░ ████████░   ██████░ ██████████░    ║"
+  echo "  ║  ██░   ██░░░ ██░░░░░░██░ ██░░░░░░░░░ ██░░░░░░██░ ░░██░░░ ░░░░██░░░░░    ║"
+  echo "  ║  ██░ ██░░░   ██░     ██░ ██░         ██░     ██░   ██░       ██░        ║"
+  echo "  ║  ████░░░     ████████░░░ ████████░   ██░     ██░   ██░       ██░        ║"
+  echo "  ║  ██░░██░     ██░░██░░░   ██░░░░░░░   ██░     ██░   ██░       ██░        ║"
+  echo "  ║  ██░ ░░██░   ██░ ░░██░   ██░         ██░     ██░   ██░       ██░        ║"
+  echo "  ║  ██░   ░░██░ ██░   ░░██░ ██████████░ ████████░░░ ██████░     ██░        ║"
+  echo "  ║  ░░░     ░░░ ░░░     ░░░ ░░░░░░░░░░░ ░░░░░░░░░   ░░░░░░░     ░░░        ║"
+  echo "  ║                                                                         ║"
+  echo "  ║  Trusted Autonomy for enterprise AI                                     ║"
+  echo "  ║                                                                         ║"
+  echo "  ║  Kredit is pre-execution risk intelligence for AI agents. It scores     ║"
+  echo "  ║  every agent's intent before it acts — so safe actions move forward     ║"
+  echo "  ║  and the risky ones are blocked.                                        ║"
+  echo "  ║                                                                         ║"
+  echo "  ║  Get started:                                                           ║"
+  echo "  ║    kredit org      create & activate organizations (own your fleet)     ║"
+  echo "  ║    kredit agents   create agents with a budget & priority               ║"
+  echo "  ║    kredit rules    add spend rules — per-txn caps, daily & rate limits  ║"
+  echo "  ║    kredit check    score a transaction's risk before it runs            ║"
+  echo "  ║                                                                         ║"
+  echo "  ║  Dashboard:  https://kredit.sh/platform                                 ║"
+  echo "  ╚═════════════════════════════════════════════════════════════════════════╝"
   echo ""
 }
 
-# kredit pilot — one call: create a fresh sandbox, seed a fleet, run a pilot
-# simulation, and open its environment in the dashboard. No --sandbox-id needed.
+# Stream a running simulation's SSE feed as an aligned table; prints the
+# summary when the run completes. $1 = simulation id.
+stream_simulation() {
+  local sim_id="$1"
+
+  # Ctrl-C (or TERM) → stop the server-side run, then leave.
+  trap 'echo ""; curl -s -X POST "${BASE_URL}/simulations/${sim_id}/stop" -H "Authorization: Bearer ${API_KEY}" >/dev/null 2>&1; echo "  stopped simulation '"${sim_id}"'"; exit 0' INT TERM
+
+  printf "  %-18s %-26s %10s   %-8s  %s\n" "AGENT" "ACTION" "COST" "STATUS" "REASON"
+  echo "  ───────────────────────────────────────────────────────────────────────────────────"
+
+  curl -sN "${BASE_URL}/simulations/${sim_id}/stream" \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "User-Agent: kredit-cli/${VERSION}" \
+  | while IFS= read -r line; do
+      case "$line" in
+        data:*) ;;
+        *) continue ;;
+      esac
+      local json="${line#data:}"
+      json="${json# }"
+      local type
+      type=$(printf '%s' "$json" | jq -r '.type // empty' 2>/dev/null)
+      case "$type" in
+        action)
+          local agent action cost status reason
+          agent=$(printf '%s'  "$json" | jq -r '.action.agent_name // "-"' 2>/dev/null)
+          action=$(printf '%s' "$json" | jq -r '.action.action // "-"' 2>/dev/null)
+          cost=$(printf '%s'   "$json" | jq -r '.action.cost // 0' 2>/dev/null)
+          status=$(printf '%s' "$json" | jq -r '.action.card.status // "-"' 2>/dev/null)
+          reason=$(printf '%s' "$json" | jq -r '.action.card.block_reason // ""' 2>/dev/null)
+          printf "  %-18s %-26s \$%9s   %-8s  %s\n" \
+            "$agent" "$action" "$cost" "$status" "$reason"
+          ;;
+        done)
+          echo "  ───────────────────────────────────────────────────────────────────────────────────"
+          break
+          ;;
+      esac
+    done
+  trap - INT TERM
+
+  # ── Summary block from the persisted run record ──────────────────────────
+  local rec
+  rec=$(curl -s "${BASE_URL}/simulations/${sim_id}" \
+    -H "Authorization: Bearer ${API_KEY}" 2>/dev/null)
+  local total spend prevented blocked flagged
+  total=$(printf '%s' "$rec" | jq -r '.total_actions // 0' 2>/dev/null)
+  spend=$(printf '%s' "$rec" | jq -r '.total_spend // 0' 2>/dev/null)
+  prevented=$(printf '%s' "$rec" | jq -r '.prevented_spend // 0' 2>/dev/null)
+  blocked=$(printf '%s' "$rec" | jq -r '.blocked_count // 0' 2>/dev/null)
+  flagged=$(printf '%s' "$rec" | jq -r '.flagged_count // 0' 2>/dev/null)
+  echo ""
+  echo "  ═══════════════════════════════════════════════════════════════════"
+  echo "  Simulation summary"
+  echo "  ═══════════════════════════════════════════════════════════════════"
+  printf "  %-22s %s\n" "Total actions"    "$total"
+  printf "  %-22s \$%s\n" "Total spend"     "$spend"
+  printf "  %-22s \$%s\n" "Prevented spend" "$prevented"
+  printf "  %-22s %s\n" "Blocked"          "$blocked"
+  printf "  %-22s %s\n" "Flagged"          "$flagged"
+  echo "  ═══════════════════════════════════════════════════════════════════"
+}
+
+# kredit pilot — the full terminal flow: create an organization, seed a fleet
+# with guardrail rules, stream a live pilot simulation into the terminal, and
+# open the run's environment in the platform.
 cmd_pilot() {
   require_api_key
-  local agent_count=10 integrations=""
+  local agent_count=10 integrations="" org_name=""
   for arg in "$@"; do
     case "$arg" in
       --agents=*|--agent-count=*) agent_count="${arg#*=}" ;;
       --integrations=*) integrations="${arg#--integrations=}" ;;
-      --help) echo "Usage: kredit pilot [--agents=N] [--integrations=stripe,visa,...]"; return 0 ;;
+      --org=*|--name=*) org_name="${arg#*=}" ;;
+      --help) echo "Usage: kredit pilot [--agents=N] [--integrations=stripe,visa,...] [--org=NAME]"; return 0 ;;
       --*) die "Unknown argument: $arg" ;;
     esac
   done
+
+  # Relax strict mode — a curl/jq hiccup must not kill the flow.
+  set +e
+  set +u
+  set +o pipefail
+
+  kredit_banner
+  echo "  This pilot stands up an organization with a ${agent_count}-agent fleet and"
+  echo "  streams a live simulation of real-world API spend, payouts, and infra costs."
   echo ""
-  echo "  Bootstrapping a fresh pilot — sandbox + ${agent_count}-agent fleet..."
+
+  # ── [1/3] Organization ────────────────────────────────────────────────────
+  [ -z "$org_name" ] && org_name="kredit-pilot-$(date +%Y%m%d-%H%M%S)"
+  echo "[1/3] Creating organization: $org_name"
+  local org_resp org_id
+  org_resp=$(curl -s -X POST "${BASE_URL}/orgs" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -H "User-Agent: kredit-cli/${VERSION}" \
+    -d "{\"name\":\"${org_name}\"}" 2>/dev/null)
+  org_id=$(printf '%s' "$org_resp" | jq -r '.id // empty' 2>/dev/null)
+  [ -z "$org_id" ] && die "Failed to create organization: $org_resp"
+  echo "      org_id: $org_id"
+  echo ""
+
+  # ── [2/3] Fleet: agents + guardrail rules, seeded into the sandbox-mode env ─
+  echo "[2/3] Creating ${agent_count} agents + guardrail rules..."
   local body
   if [ -n "$integrations" ]; then
     local integs_json
@@ -832,37 +766,52 @@ cmd_pilot() {
   else
     body="{\"agent_count\":${agent_count}}"
   fi
-  local resp env_id sim_id n_agents
-  resp=$(curl -s -X POST "${BASE_URL}/pilot" \
+  local pilot_resp sim_id env_id rules
+  pilot_resp=$(curl -s -X POST "${BASE_URL}/orgs/${org_id}/pilot" \
     -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
     -H "User-Agent: kredit-cli/${VERSION}" -d "$body" 2>/dev/null)
-  env_id=$(printf '%s' "$resp" | jq -r '.environment_id // empty' 2>/dev/null)
-  sim_id=$(printf '%s' "$resp" | jq -r '.simulation_id // empty' 2>/dev/null)
-  n_agents=$(printf '%s' "$resp" | jq -r '(.agent_ids | length) // 0' 2>/dev/null)
-  [ -z "$env_id" ] && die "Pilot failed: $resp"
-  echo "  ✓ fleet          ${n_agents} agents"
-  echo "  ✓ pilot sim      ${sim_id}"
-  local url="${DASHBOARD_URL}/platform/environments/${env_id}"
+  sim_id=$(printf '%s' "$pilot_resp" | jq -r '.simulation_id // empty' 2>/dev/null)
+  env_id=$(printf '%s' "$pilot_resp" | jq -r '.environment_id // empty' 2>/dev/null)
+  rules=$(printf '%s' "$pilot_resp" | jq -r '.rules_added // 0' 2>/dev/null)
+  [ -z "$sim_id" ] && die "Pilot failed: $pilot_resp"
+
+  # per-agent ✓ rows (identity + score), like the classic flow
+  curl -s "${BASE_URL}/agents?org_id=${org_id}" \
+    -H "Authorization: Bearer ${API_KEY}" 2>/dev/null \
+  | jq -r '.[] | "      ✓ \(.name)|priority=\(.priority)|score=\(.credit.score)|id=\(.id)"' 2>/dev/null \
+  | awk -F'|' '{printf "%s %-12s %-18s %-11s %s\n", "", $1, $2, $3, $4}'
   echo ""
-  echo "  → ${url}"
+  echo "      Created $(printf '%s' "$pilot_resp" | jq -r '(.agent_ids | length) // 0') agents + ${rules} guardrail rules"
+  echo ""
+
+  # ── [3/3] Live simulation, streamed into the terminal ─────────────────────
+  echo "[3/3] Running the pilot simulation (Ctrl-C to stop)..."
+  echo ""
+  local url="${DASHBOARD_URL}/platform/environments/${env_id}"
+  echo "  Opening the run's environment: $url"
   open_url "$url"
+  echo ""
+  stream_simulation "$sim_id"
+  echo ""
+  echo "  Environment: $url"
   echo ""
 }
 
 cmd_sim() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id="" mode="predictive" period="1mo" duration="60" budget="0" seed="42" args=""
+  local org_id="" env_id="" mode="predictive" period="1mo" duration="60" budget="0" seed="42" args="" id=""
   local positionals=()
   for arg in "$@"; do
     case "$arg" in
-      --sandbox-id=*) sandbox_id="${arg#--sandbox-id=}" ;;
+      --org-id=*) org_id="${arg#--org-id=}" ;;
+      --environment-id=*|--env-id=*) env_id="${arg#*=}" ;;
       --mode=*) mode="${arg#--mode=}" ;;
       --period=*) period="${arg#--period=}" ;;
       --duration=*) duration="${arg#--duration=}" ;;
       --monthly-budget=*) budget="${arg#--monthly-budget=}" ;;
       --seed=*) seed="${arg#--seed=}" ;;
       --args=*) args="${arg#--args=}" ;;
-      --id=*) sandbox_id="${arg#--id=}" ;;
+      --id=*) id="${arg#--id=}" ;;
       --help) ;;
       --*) die "Unknown argument: $arg" ;;
       *) positionals+=("$arg") ;;
@@ -872,61 +821,98 @@ cmd_sim() {
   [ "$mode" = "live" ] && mode="realtime"
   case "$subcmd" in
     live|"")
-      # the full live run: a streamed server run through the kredit cycle.
-      # No --sandbox-id → stand up a fresh sandbox + org + agents + rules, run a
-      # pilot, and open the run's environment in the dashboard.
-      if [ -z "$sandbox_id" ]; then
-        bootstrap_and_pilot
+      # The full terminal flow: stream a live run on the activated org's fleet.
+      # No org (or an empty one) → fall back to the complete pilot bootstrap.
+      require_api_key
+      set +e; set +u; set +o pipefail
+      local oid; oid=$(resolve_org_id "$org_id")
+      local agents_n=0
+      if [ -n "$oid" ]; then
+        agents_n=$(curl -s "${BASE_URL}/agents?org_id=${oid}" \
+          -H "Authorization: Bearer ${API_KEY}" 2>/dev/null | jq -r 'length' 2>/dev/null)
       else
-        cmd_simulation "$sandbox_id" "$duration" "$seed"
-      fi ;;
+        agents_n=$(curl -s "${BASE_URL}/agents" \
+          -H "Authorization: Bearer ${API_KEY}" 2>/dev/null | jq -r 'length' 2>/dev/null)
+      fi
+      if [ -z "$agents_n" ] || [ "$agents_n" = "0" ]; then
+        cmd_pilot
+        return
+      fi
+
+      kredit_banner
+      echo "  Streaming a live simulation of your fleet (${agents_n} agents) —"
+      echo "  real transactions through the kredit cycle: intent → identity →"
+      echo "  trust → execute → observe → optimize."
+      echo ""
+      local body="{\"mode\":\"realtime\",\"duration_sec\":${duration},\"seed\":${seed},\"stream\":true}"
+      [ -n "$oid" ] && body="{\"org_id\":\"${oid}\",${body#\{}"
+      [ -n "$env_id" ] && body="${body%\}},\"environment_id\":\"${env_id}\"}"
+      local resp sim_id sim_env
+      resp=$(curl -s -X POST "${BASE_URL}/simulations/run" \
+        -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+        -H "User-Agent: kredit-cli/${VERSION}" -d "$body" 2>/dev/null)
+      sim_id=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
+      [ -z "$sim_id" ] && die "Failed to start simulation: $resp"
+      sim_env=$(printf '%s' "$resp" | jq -r '.environment_id // empty' 2>/dev/null)
+      local url="${DASHBOARD_URL}/platform/environments/${sim_env}"
+      echo "  Opening the run's environment: $url"
+      open_url "$url"
+      echo ""
+      stream_simulation "$sim_id"
+      echo ""
+      echo "  Environment: $url"
+      echo ""
+      ;;
     stop)
-      local sid="${positionals[0]:-$sandbox_id}"
+      local sid="${positionals[0]:-$id}"
       [ -z "$sid" ] && die "Usage: kredit simulation stop <simulation_id>"
       api_request POST "/simulations/${sid}/stop" ;;
     predictive)
-      [ -z "$sandbox_id" ] && die "Missing --sandbox-id (or run 'kredit init sandbox simulation <name>' and set up agents first)"
-      local pbody="{\"sandbox_id\":\"${sandbox_id}\",\"mode\":\"predictive\",\"period\":\"${period}\",\"seed\":${seed}}"
+      local oid; oid=$(resolve_org_id "$org_id")
+      local pbody="{\"mode\":\"predictive\",\"period\":\"${period}\",\"seed\":${seed}"
+      [ -n "$oid" ] && pbody="${pbody},\"org_id\":\"${oid}\""
+      [ -n "$env_id" ] && pbody="${pbody},\"environment_id\":\"${env_id}\""
+      pbody="${pbody}}"
       api_request POST "/simulations/run" "$(merge_args "$pbody" "$args")" ;;
     run)
-      [ -z "$sandbox_id" ] && die "Missing --sandbox-id"
-      local body="{\"sandbox_id\":\"${sandbox_id}\",\"mode\":\"${mode}\",\"period\":\"${period}\",\"duration_sec\":${duration},\"monthly_budget\":${budget},\"seed\":${seed}}"
+      local oid; oid=$(resolve_org_id "$org_id")
+      local body="{\"mode\":\"${mode}\",\"period\":\"${period}\",\"duration_sec\":${duration},\"monthly_budget\":${budget},\"seed\":${seed}"
+      [ -n "$oid" ] && body="${body},\"org_id\":\"${oid}\""
+      [ -n "$env_id" ] && body="${body},\"environment_id\":\"${env_id}\""
+      body="${body}}"
       api_request POST "/simulations/run" "$(merge_args "$body" "$args")" ;;
     list)
-      if [ -n "$sandbox_id" ]; then api_request GET "/simulations?sandbox_id=${sandbox_id}"; else api_request GET "/simulations"; fi ;;
+      local oid; oid=$(resolve_org_id "$org_id")
+      if [ -n "$oid" ]; then api_request GET "/simulations?org_id=${oid}"; else api_request GET "/simulations"; fi ;;
     get)
-      [ -z "$sandbox_id" ] && die "Missing --id (simulation id)"; api_request GET "/simulations/${sandbox_id}" ;;
+      local sid="${positionals[0]:-$id}"
+      [ -z "$sid" ] && die "Missing --id (simulation id)"; api_request GET "/simulations/${sid}" ;;
     --help|help)
       cat <<'H'
 Usage: kredit simulation [subcommand]
-  (none) | live [--sandbox-id=ID]
-        run the live simulation — real transactions through the kredit cycle
-        (intent → identity → trust → execute → observe → optimize).
-        Without --sandbox-id: bootstrap a fresh sandbox + org + agents +
-        guardrail rules, run a pilot, and open the environment in the dashboard.
-  predictive --sandbox-id=ID [--period=1d|1wk|2wk|1mo|1quarter|1year] [--seed=N]
-        project the sandbox's fleet over a horizon with weekly guardrail optimization
-  run  --sandbox-id=ID [--mode=predictive|live] [--period=1mo] [--duration=60] [--seed=N]
-  list [--sandbox-id=ID] | get --id=SIM_ID
+  (none) | live [--org-id=ID] [--environment-id=ENV_ID] [--duration=SECS]
+        stream a live simulation of the activated org's fleet in the terminal
+        and open the run's environment in the platform. An empty org falls
+        back to the full pilot bootstrap (org + agents + rules + run).
+  predictive [--org-id=ID] [--environment-id=ENV_ID] [--period=1d|1wk|2wk|1mo|1quarter|1year] [--seed=N]
+        project the fleet over a horizon with weekly guardrail optimization
+  run  [--org-id=ID] [--mode=predictive|live] [--period=1mo] [--duration=60] [--seed=N]
+  list [--org-id=ID] | get <SIM_ID> | stop <SIM_ID>
 H
       ;;
     *) die "Unknown simulation subcommand: $subcmd" ;;
   esac
 }
 
-# kredit init sandbox simulation <name> — create a sandbox (always starts in
-# simulation mode); the container that owns orgs, agents, rules & simulations.
+# kredit init org <name> — create an organization; the top-level container
+# that owns agents, environments, workflows, rules & simulations.
 cmd_init() {
   require_api_key
   local what="${1:-}"; shift 2>/dev/null || true
-  [ "$what" != "sandbox" ] && die "Usage: kredit init sandbox simulation <name>"
-  local stage="${1:-}"
-  case "$stage" in
-    simulation|preview|production) shift 2>/dev/null || true ;;
-  esac
+  [ "$what" != "org" ] && die "Usage: kredit init org <name>"
   local name="${1:-}"
-  [ -z "$name" ] && die "Usage: kredit init sandbox simulation <name>"
-  api_request POST "/sandboxes" "{\"name\":\"${name}\"}"
+  [ -z "$name" ] && die "Usage: kredit init org <name>"
+  api_request POST "/orgs" "{\"name\":\"${name}\"}"
 }
 
 cmd_action() {
@@ -1011,18 +997,18 @@ cmd_verify() {
 #   kya → agent   (--agent-id | --name | positional)   POST /agents/kya-token
 #   kyb → org     (--org-id   | --name | positional)   POST /orgs/kyb-token
 #   kyc → account (no subject — the authed user)       POST /account/kyc-token
-# A 24-hex positional is treated as an id, anything else as a (sandbox-unique)
+# A 24-hex positional is treated as an id, anything else as an (org-unique)
 # name. The token is shown ONCE; the server stores only a hash.
 _identity_token() {
   local kind="$1" id_field="$2" path="$3"; shift 3
   local kind_uc
   kind_uc=$(echo "$kind" | tr '[:lower:]' '[:upper:]')
-  local subject_id="" name="" sandbox_id="" provider=""
+  local subject_id="" name="" org_id="" provider=""
   for arg in "$@"; do
     case "$arg" in
       "--${id_field}="*) subject_id="${arg#*=}" ;;
       --name=*) name="${arg#--name=}" ;;
-      --sandbox-id=*) sandbox_id="${arg#--sandbox-id=}" ;;
+      --org-id=*) org_id="${arg#--org-id=}" ;;
       --provider=*) provider="${arg#--provider=}" ;;
       --help)
         if [ "$kind" = "kyc" ]; then
@@ -1030,7 +1016,7 @@ _identity_token() {
           echo "Issues a ${kind_uc} token for your account."
         else
           echo "Usage: kredit ${kind} <name-or-id>"
-          echo "       kredit ${kind} --${id_field}=ID | --name=NAME [--sandbox-id=ID] [--provider=kredit]"
+          echo "       kredit ${kind} --${id_field}=ID | --name=NAME [--org-id=ID] [--provider=kredit]"
           echo "Issues a ${kind_uc} token (name must be unique)."
         fi
         return 0 ;;
@@ -1049,7 +1035,7 @@ _identity_token() {
       body="${body}\"${id_field//-/_}\":\"${subject_id}\""; sep=","
     else
       body="${body}\"name\":\"${name}\""; sep=","
-      if [ -n "$sandbox_id" ]; then body="${body}${sep}\"sandbox_id\":\"${sandbox_id}\""; fi
+      if [ -n "$org_id" ]; then body="${body}${sep}\"org_id\":\"${org_id}\""; fi
     fi
   fi
   if [ -n "$provider" ]; then body="${body}${sep}\"provider\":\"${provider}\""; fi
@@ -1062,18 +1048,21 @@ cmd_kyb() { _identity_token kyb org-id "/orgs/kyb-token" "$@"; }
 cmd_kyc() { _identity_token kyc "" "/account/kyc-token" "$@"; }
 
 cmd_optimize() {
-  local sandbox_id="" period="1mo" apply="true"
+  local org_id="" period="1mo" apply="true"
   for arg in "$@"; do
     case "$arg" in
-      --sandbox-id=*) sandbox_id="${arg#--sandbox-id=}" ;;
+      --org-id=*) org_id="${arg#--org-id=}" ;;
       --period=*) period="${arg#--period=}" ;;
       --dry-run) apply="false" ;;
-      --help) echo "Usage: kredit optimize --sandbox-id=ID [--period=1mo] [--dry-run]"; return 0 ;;
+      --help) echo "Usage: kredit optimize [--org-id=ID] [--period=1mo] [--dry-run]"; return 0 ;;
       *) die "Unknown argument: $arg" ;;
     esac
   done
-  [ -z "$sandbox_id" ] && die "Missing --sandbox-id"
-  api_request POST "/actions/optimize" "{\"sandbox_id\":\"${sandbox_id}\",\"period\":\"${period}\",\"apply\":${apply}}"
+  local oid; oid=$(resolve_org_id "$org_id")
+  local body="{\"period\":\"${period}\",\"apply\":${apply}"
+  [ -n "$oid" ] && body="${body},\"org_id\":\"${oid}\""
+  body="${body}}"
+  api_request POST "/actions/optimize" "$body"
 }
 
 # kredit run <action> — one-shot full 6-stage trusted path (intent → identity →
@@ -1134,7 +1123,7 @@ cmd_run() {
   fi
 }
 
-# ── Priors (per-sandbox behavioural priors for the simulation engine) ─────────
+# ── Priors (per-org behavioural priors for the simulation engine) ─────────────
 #
 # Priors describe expected agent behaviour — call frequency, per-call cost, and
 # a day-of-week / hour-of-day seasonality curve — that the server's simulation
@@ -1143,14 +1132,14 @@ cmd_run() {
 # expects inlined curves.
 cmd_priors() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id="" mode="" environment_id="" name="" prior_id=""
+  local org_id="" mode="" environment_id="" name="" prior_id=""
   local freq_mean="" freq_var="" cost_mean="" cost_var="" preset=""
   local positionals=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --sandbox-id) sandbox_id="${2:-}"; shift 2 ;;
-      --sandbox-id=*) sandbox_id="${1#--sandbox-id=}"; shift ;;
+      --org-id) org_id="${2:-}"; shift 2 ;;
+      --org-id=*) org_id="${1#--org-id=}"; shift ;;
       --mode) mode="${2:-}"; shift 2 ;;
       --mode=*) mode="${1#--mode=}"; shift ;;
       --environment-id) environment_id="${2:-}"; shift 2 ;;
@@ -1177,9 +1166,9 @@ cmd_priors() {
 
   case "$subcmd" in
     list)
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      local query="sandbox_id=${sid}"
+      local sid; sid=$(resolve_org_id "$org_id")
+      local query=""
+      [ -n "$sid" ] && query="org_id=${sid}"
       if [ -n "$mode" ]; then validate_mode "$mode"; query="${query}&mode=${mode}"; fi
       [ -n "$environment_id" ] && query="${query}&environment_id=${environment_id}"
       api_request GET "/priors?${query}"
@@ -1189,8 +1178,7 @@ cmd_priors() {
       ;;
     set)
       [ -z "$name" ] && die "Missing --name"
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
+      local sid; sid=$(resolve_org_id "$org_id")
       [ -n "$mode" ] && validate_mode "$mode"
       preset="${preset:-24x7}"
 
@@ -1212,7 +1200,7 @@ cmd_priors() {
       [ -n "$mode" ] && body="${body},\"mode\":\"${mode}\""
       [ -n "$environment_id" ] && body="${body},\"environment_id\":\"${environment_id}\""
       body="${body}}"
-      api_request POST "/priors?sandbox_id=${sid}" "$body"
+      if [ -n "$sid" ]; then api_request POST "/priors?org_id=${sid}" "$body"; else api_request POST "/priors" "$body"; fi
       ;;
     delete)
       prior_id="${positionals[0]:-}"
@@ -1223,19 +1211,20 @@ cmd_priors() {
       cat <<'H'
 Usage: kredit priors <list|presets|set|delete>
 
-  kredit priors list [--sandbox-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
-      list behavioural priors for a sandbox (mode/environment optional filter)
+  kredit priors list [--org-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
+      list the org's behavioural priors (mode/environment optional filter)
   kredit priors presets
       show available seasonality presets (24x7, weekday, business-hours)
   kredit priors set --name=NAME [--frequency-mean=F] [--frequency-var=V]
                     [--cost-mean=C] [--cost-var=V]
                     [--seasonality-preset=weekday|24x7|business-hours]
-                    [--sandbox-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
+                    [--org-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
       create a prior (seasonality defaults to 24x7; means/variances default to 1)
   kredit priors delete <prior_id>
 
-  Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
-  sandbox_id=... in ~/.kredit/config.
+  The organization resolves from --org-id, then KREDIT_ORG_ID, then
+  org_id=... in ~/.kredit/config (set by `kredit org activate`) — else the
+  server uses your activated organization.
   MODE: simulation, preview, production
   ENV_ID: environment id (canonical scope; --env-id is an alias)
 H
@@ -1246,23 +1235,23 @@ H
   esac
 }
 
-# ── Workflows (per-sandbox agent graphs the simulation engine can run) ────────
+# ── Workflows (per-org agent graphs the simulation engine can run) ────────────
 #
 # A workflow is a directed graph of typed nodes (agent|llm|api|tool|payment)
 # wired by edges. The server validates the graph (rejects cycles, etc.) and can
 # simulate a run, emitting a per-node trust card. Graph JSON is passed inline via
 # --graph or from a file via --file, and looks like:
 #   {"nodes":[{"id":"n1","type":"llm","label":"plan"}],"edges":[{"from":"n1","to":"n2"}]}
-# The sandbox_id + name are merged into the body before POST/PUT.
+# The org_id + name are merged into the body before POST/PUT.
 cmd_workflow() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id="" mode="" environment_id="" name="" graph="" file="" seed="42"
+  local org_id="" mode="" environment_id="" name="" graph="" file="" seed="42"
   local positionals=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --sandbox-id) sandbox_id="${2:-}"; shift 2 ;;
-      --sandbox-id=*) sandbox_id="${1#--sandbox-id=}"; shift ;;
+      --org-id) org_id="${2:-}"; shift 2 ;;
+      --org-id=*) org_id="${1#--org-id=}"; shift ;;
       --mode) mode="${2:-}"; shift 2 ;;
       --mode=*) mode="${1#--mode=}"; shift ;;
       --environment-id) environment_id="${2:-}"; shift 2 ;;
@@ -1284,7 +1273,7 @@ cmd_workflow() {
   done
 
   # Read a graph from --file if given, else use --graph. Strip the outer braces
-  # so the nodes/edges can be spliced into a body that also carries sandbox_id.
+  # so the nodes/edges can be spliced into a body that also carries org_id.
   resolve_graph() {
     local g="$graph"
     if [ -n "$file" ]; then
@@ -1299,17 +1288,16 @@ cmd_workflow() {
 
   case "$subcmd" in
     list)
-      # workflows are sandbox-level definitions — no env/mode scope on listing
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      api_request GET "/workflows?sandbox_id=${sid}"
+      # workflows are org-level definitions — no env/mode scope on listing
+      local sid; sid=$(resolve_org_id "$org_id")
+      if [ -n "$sid" ]; then api_request GET "/workflows?org_id=${sid}"; else api_request GET "/workflows"; fi
       ;;
     create)
       [ -z "$name" ] && die "Missing --name"
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
+      local sid; sid=$(resolve_org_id "$org_id")
       local gcontent; gcontent=$(resolve_graph)
-      local body="{\"sandbox_id\":\"${sid}\",\"name\":\"${name}\""
+      local body="{\"name\":\"${name}\""
+      [ -n "$sid" ] && body="{\"org_id\":\"${sid}\",${body#\{}"
       body="${body},${gcontent}}"
       api_request POST "/workflows" "$body"
       ;;
@@ -1388,10 +1376,10 @@ cmd_workflow() {
       cat <<'H'
 Usage: kredit workflow <list|create|get|update|delete|run|execute|runs|run-get>
 
-  kredit workflow list [--sandbox-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
-      list workflows for a sandbox (mode/environment optional filter)
+  kredit workflow list [--org-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
+      list the org's workflows (mode/environment optional filter)
   kredit workflow create --name=NAME (--graph='<json>' | --file=path.json)
-                    [--sandbox-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
+                    [--org-id=ID] [--mode=MODE] [--environment-id=ENV_ID]
       create a workflow; <json> is {"nodes":[...],"edges":[...]}
   kredit workflow get <id>
   kredit workflow update <id> [--name=NAME] [--graph='<json>' | --file=path.json]
@@ -1407,8 +1395,9 @@ Usage: kredit workflow <list|create|get|update|delete|run|execute|runs|run-get>
       get a single execution run record by run id
 
   Node types: agent | llm | api | tool | payment
-  Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
-  sandbox_id=... in ~/.kredit/config.
+  The organization resolves from --org-id, then KREDIT_ORG_ID, then
+  org_id=... in ~/.kredit/config (set by `kredit org activate`) — else the
+  server uses your activated organization.
   MODE: simulation, preview, production
   ENV_ID: environment id (canonical scope; --env-id is an alias)
 H
@@ -1419,23 +1408,23 @@ H
   esac
 }
 
-# ── Environments (the scope inside a sandbox: modes + per-simulation snapshots) ─
+# ── Environments (the scope inside an org: modes + per-simulation snapshots) ─
 #
-# A sandbox contains many environments, each scoped by a mode (simulation |
+# An organization contains many environments, each scoped by a mode (sandbox |
 # preview | production). The 3 modes are the standard environments (exactly one
-# production env per sandbox); each simulation run is its own simulation-mode
+# production env per org); each simulation run is its own sandbox-mode
 # environment (with simulation_id) nested inside its parent env via
-# parent_environment_id. Orgs/agents/rules/priors/workflows belong to an
-# environment. Standard (mode) envs cannot be deleted.
+# parent_environment_id. Agents/rules/priors belong to an environment.
+# Standard (mode) envs cannot be deleted.
 cmd_environment() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id="" mode="" name="" simulation_id=""
+  local org_id="" mode="" name="" simulation_id=""
   local positionals=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --sandbox-id) sandbox_id="${2:-}"; shift 2 ;;
-      --sandbox-id=*) sandbox_id="${1#--sandbox-id=}"; shift ;;
+      --org-id) org_id="${2:-}"; shift 2 ;;
+      --org-id=*) org_id="${1#--org-id=}"; shift ;;
       --mode) mode="${2:-}"; shift 2 ;;
       --mode=*) mode="${1#--mode=}"; shift ;;
       --name) name="${2:-}"; shift 2 ;;
@@ -1450,21 +1439,19 @@ cmd_environment() {
 
   case "$subcmd" in
     list)
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
+      local sid; sid=$(resolve_org_id "$org_id")
       local resp
-      resp=$(api_request GET "/environments?sandbox_id=${sid}") || return 1
+      resp=$(api_request GET "/environments?org_id=${sid}") || return 1
       if command -v jq &>/dev/null; then
-        echo "$resp" | jq -r '.[] | "  \(if .active then "*" else " " end) \(.mode)\t\(.name)\(if .parent_environment_id then "  (parent: \(.parent_environment_id))" else "" end)"'
+        echo "$resp" | jq -r '.[] | "  \(if .active then "*" else " " end) \(.mode)\t\(.id)\t\(.name)\(if .parent_environment_id then "  (parent: \(.parent_environment_id))" else "" end)"'
       else
         echo "$resp"
       fi
       ;;
     create)
       [ -z "$mode" ] && die "Missing --mode (simulation|preview|production)"
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
-      local body="{\"sandbox_id\":\"${sid}\",\"mode\":\"${mode}\""
+      local sid; sid=$(resolve_org_id "$org_id")
+      local body="{\"org_id\":\"${sid}\",\"mode\":\"${mode}\""
       [ -n "$name" ] && body="${body},\"name\":\"${name}\""
       [ -n "$simulation_id" ] && body="${body},\"simulation_id\":\"${simulation_id}\""
       body="${body}}"
@@ -1484,17 +1471,18 @@ cmd_environment() {
       cat <<'H'
 Usage: kredit environment <list|create|get|delete>   (alias: env)
 
-  kredit environment list [--sandbox-id=ID]
-      list a sandbox's environments (mode, name, active *); simulation run
-      envs (mode simulation with a parent) also show their parent environment
-  kredit environment create --mode=MODE [--name=NAME] [--sandbox-id=ID] [--simulation-id=ID]
-      MODE: simulation | preview | production
+  kredit environment list [--org-id=ID]
+      list the org's environments (mode, name, live *); simulation run
+      envs (mode sandbox with a parent) also show their parent environment
+  kredit environment create --mode=MODE [--name=NAME] [--org-id=ID]
+      MODE: sandbox | preview | production
   kredit environment get <id>
   kredit environment delete <id>
       (standard mode environments cannot be deleted)
 
-  Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
-  sandbox_id=... in ~/.kredit/config.
+  The organization resolves from --org-id, then KREDIT_ORG_ID, then
+  org_id=... in ~/.kredit/config (set by `kredit org activate`) — else the
+  server uses your activated organization.
 H
       ;;
     *)
@@ -1505,18 +1493,18 @@ H
 
 # ── Chats (persisted Kredit-agent conversations) ──────────────────────────────
 #
-# A chat is a conversation with the Kredit orchestrator agent, bound to a sandbox
+# A chat is a conversation with the Kredit orchestrator agent, bound to an org
 # (and optionally a mode/simulation). These verbs manage the chat container and
 # its message history; the turn-by-turn agent send loop lives server-side.
 cmd_chat() {
   local subcmd="${1:-}"; shift 2>/dev/null || true
-  local sandbox_id=""
+  local org_id=""
   local positionals=()
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --sandbox-id) sandbox_id="${2:-}"; shift 2 ;;
-      --sandbox-id=*) sandbox_id="${1#--sandbox-id=}"; shift ;;
+      --org-id) org_id="${2:-}"; shift 2 ;;
+      --org-id=*) org_id="${1#--org-id=}"; shift ;;
       --help) subcmd="${subcmd:-help}"; break ;;
       --*) die "Unknown argument: $1" ;;
       *) positionals+=("$1"); shift ;;
@@ -1525,10 +1513,9 @@ cmd_chat() {
 
   case "$subcmd" in
     list)
-      local sid; sid=$(resolve_sandbox_id "$sandbox_id")
-      [ -z "$sid" ] && die "No sandbox. Pass --sandbox-id=ID or set sandbox_id=... in ~/.kredit/config"
+      local sid; sid=$(resolve_org_id "$org_id")
       local resp
-      resp=$(api_request GET "/chats?sandbox_id=${sid}") || return 1
+      resp=$(api_request GET "/chats?org_id=${sid}") || return 1
       if command -v jq &>/dev/null; then
         echo "$resp" | jq -r '.[] | "  \(.id)\t\(.title)"'
       else
@@ -1557,14 +1544,15 @@ cmd_chat() {
       cat <<'H'
 Usage: kredit chat <list|get|delete>
 
-  kredit chat list [--sandbox-id=ID]
-      list persisted chats for a sandbox
+  kredit chat list [--org-id=ID]
+      list the org's persisted chats
   kredit chat get <id>
       print a chat's title and each message (role + content)
   kredit chat delete <id>
 
-  Sandbox resolves from --sandbox-id, then KREDIT_SANDBOX_ID, then
-  sandbox_id=... in ~/.kredit/config.
+  The organization resolves from --org-id, then KREDIT_ORG_ID, then
+  org_id=... in ~/.kredit/config (set by `kredit org activate`) — else the
+  server uses your activated organization.
 H
       ;;
     *)
@@ -1583,75 +1571,65 @@ Usage:
 Commands:
   login       Authenticate and create an API key
   logout      Remove saved API key
-  init        kredit init sandbox simulation <name> — create a sandbox
-  sandbox     Manage sandboxes (create/copy/promote/versions/switch)
-  simulation  Live or predictive simulation on a sandbox (live | predictive)
+  init        kredit init org <name> — create an organization
+  org         Manage organizations (list, create, activate, versions, restore)
+  pilot       Create an org + agent fleet + rules, stream a live pilot simulation
+  simulation  Stream a live simulation of your fleet (live | predictive)
   action      Dry-run the trust layer (action intent)
   execute     Execute a payment/api/tool action (env-gated)
   verify      Run identity verification (kya/kyb/kyc)
   kya         Issue a KYA token for an agent (by name or id) [--provider]
-  kyb         Issue a KYB token for an org (by name or id) [--provider]
+  kyb         Issue a KYB token for an organization (by name or id) [--provider]
   kyc         Issue a KYC token for your account [--provider]
-  optimize    Optimize a sandbox's guardrails from a simulation
-  priors      Manage a sandbox's behavioural priors (list, presets, set, delete)
-  workflow    Manage sandbox workflows (list, create, get, update, delete, run, execute, runs, run-get)
-  environment Manage sandbox environments / modes (list, create, get, delete; alias: env)
+  optimize    Optimize the org's guardrails from a simulation
+  priors      Manage behavioural priors (list, presets, set, delete)
+  workflow    Manage workflows (list, create, get, update, delete, run, execute, runs, run-get)
+  environment Manage environments (list, create, get, delete; alias: env)
   chat        Manage persisted agent chats (list, get, delete)
   rules       Manage agent rules (list, add, remove)
   check       Run a risk check before executing an action
   run         Run the full 6-stage trusted path in one shot (prints trust_card)
   report      Report the outcome of an action
   agents      Manage agents (list, create)
-  orgs        Manage organizations (list, create)
   score       Get/recompute trust score (score trust)
   wallet      Get wallet info for an agent
 
-Modes:
-  Sandboxes carry a mode per fleet/rule scope. Fresh sandboxes land in
-  `simulation`. Promote order: simulation → preview → production.
-  Agent STATE (wallet, counters, score) and versions live on an ENVIRONMENT, so
-  `check`, `run`, and `workflow execute` require --environment-id (alias
-  --env-id). orgs/agents/priors (list, create/set) accept an optional
-  --environment-id; --mode scopes by mode name when no environment id is given.
-  Workflows are sandbox-level definitions — the environment is chosen at
-  execution time. `kredit sandbox deploy` copies one mode's fleet/rules into
-  another.
+Model:
+  Organizations are the top level — they own agents, environments, workflows
+  and rules. Every environment has a mode: sandbox | preview | production
+  (one production env per org). Every simulation run is its own sandbox-mode
+  environment. `kredit org activate <id>` points the API + CLI at one org;
+  after that, org-scoped commands need no --org-id.
 
 Options:
   --help      Show help for a command
   --version   Print version
 
 Examples:
+  kredit pilot --agents=10 --integrations=stripe,openai
+  kredit simulation
+  kredit org list
+  kredit org create acme && kredit org activate <org_id>
+  kredit agents list --mode=sandbox
+  kredit agents create --name=bot-01 --mode=preview
   kredit check --agent-id=agt_8f3k2m --action=serp_api.search --estimated-cost=1 --environment-id=env_123
   kredit run openai.chat --agent agt_8f3k2m --environment-id env_123 --cost 1 --type api_call
   kredit report --transaction-id=txn_abc --outcome=success --actual-cost=1
-  kredit agents list --org-id=org_123 --mode=simulation
-  kredit agents create --org-name=research-team --name=bot-01 --mode=preview
-  kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100 --hourly-rate-limit=50 --mode=production
-  kredit orgs list --mode=simulation
-  kredit orgs create --name=research-team
-  kredit score --agent-id=agt_8f3k2m
-  kredit wallet --agent-id=agt_8f3k2m
+  kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=100
   kredit kya checkout-bot
-  kredit kya --agent-id=agt_8f3k2m --provider=skyfire
-  kredit kyb research-team
-  kredit kyb --org-id=org_123 --provider=experian
-  kredit kyc --provider=plaid
-  kredit sandbox deploy simulation preview --include=orgs,agents,rules --sandbox-id=sbx_123
+  kredit kyb acme --provider=experian
   kredit priors presets
-  kredit priors set --name=web-search --frequency-mean=6 --cost-mean=3 --seasonality-preset=weekday --sandbox-id=sbx_123
-  kredit priors list --sandbox-id=sbx_123
-  kredit workflow create --name=demo --graph='{"nodes":[{"id":"n1","type":"llm"}],"edges":[]}' --sandbox-id=sbx_123
-  kredit workflow run wf_123 --seed=5
+  kredit priors set --name=web-search --frequency-mean=6 --cost-mean=3 --seasonality-preset=weekday
+  kredit workflow create --name=demo --graph='{"nodes":[{"id":"n1","type":"llm"}],"edges":[]}'
   kredit workflow execute wf_123 --environment-id=env_123
-  kredit environment list --sandbox-id=sbx_123
-  kredit environment create --mode=simulation --name=exp-a --sandbox-id=sbx_123
-  kredit chat list --sandbox-id=sbx_123
-  kredit chat get cht_123
+  kredit environment list
+  kredit environment create --mode=sandbox --name=exp-a
+  kredit chat list
 
 Environment:
   KREDIT_API_KEY   API key (or set in ~/.kredit/config as api_key=...)
   KREDIT_API_URL   Base URL (default: https://api.kredit.sh)
+  KREDIT_ORG_ID    Organization id (or org_id=... in ~/.kredit/config)
 HELP
 }
 
@@ -1672,8 +1650,7 @@ main() {
     report)   cmd_report "$@" ;;
     agents)   cmd_agents "$@" ;;
     rules)    cmd_rules "$@" ;;
-    orgs)     cmd_orgs "$@" ;;
-    sandbox)  cmd_sandbox "$@" ;;
+    org|orgs) cmd_orgs "$@" ;;
     action)   cmd_action "$@" ;;
     execute)  cmd_execute "$@" ;;
     verify)   cmd_verify "$@" ;;
