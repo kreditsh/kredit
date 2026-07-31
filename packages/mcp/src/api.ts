@@ -2,6 +2,24 @@ import type { Config } from "./config.js";
 
 const TIMEOUT_MS = 5_000;
 
+/** Build a `?a=1&b=2` suffix from defined values (empty string when none). */
+function qs(params: Record<string, unknown>): string {
+	const sp = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) {
+		if (v !== undefined && v !== null && v !== "") sp.set(k, String(v));
+	}
+	const s = sp.toString();
+	return s ? `?${s}` : "";
+}
+
+/**
+ * The Kredit REST surface.
+ *
+ * Organizations are the top-level tenant: they own agents, environments,
+ * workflows and rules. `org_id` is optional on every org-scoped call — the
+ * server falls back to the user's ACTIVATED organization (see `activateOrg`).
+ * Mode lives on environments, never on the organization.
+ */
 export class KreditAPI {
 	private baseUrl: string;
 	private apiKey: string;
@@ -38,36 +56,75 @@ export class KreditAPI {
 		}
 	}
 
-	// Orgs
-	listOrgs(mode?: string, environmentId?: string) {
-		const qs = new URLSearchParams();
-		if (mode) qs.set("mode", mode);
-		if (environmentId) qs.set("environment_id", environmentId);
-		const q = qs.toString();
-		return this.request("GET", `/orgs${q ? `?${q}` : ""}`);
+	// ── Organizations (the top-level tenant) ──
+	listOrgs() {
+		return this.request("GET", "/orgs");
 	}
-	createOrg(name: string, mode?: string, environmentId?: string) {
+	createOrg(name: string, config?: unknown) {
 		return this.request("POST", "/orgs", {
 			name,
-			...(mode ? { mode } : {}),
-			...(environmentId ? { environment_id: environmentId } : {}),
+			...(config ? { config } : {}),
 		});
 	}
-	renameOrg(id: string, name: string) {
-		return this.request("PUT", `/orgs/${id}`, { name });
+	getOrg(id: string) {
+		return this.request("GET", `/orgs/${id}`);
+	}
+	updateOrg(id: string, data: any) {
+		return this.request("PUT", `/orgs/${id}`, data);
 	}
 	deleteOrg(id: string) {
 		return this.request("DELETE", `/orgs/${id}`);
 	}
+	/** Point this API key (and the kredit agent) at one organization. */
+	activateOrg(id: string) {
+		return this.request("POST", `/orgs/${id}/activate`);
+	}
+	resetOrg(id: string) {
+		return this.request("POST", `/orgs/${id}/reset`);
+	}
+	orgActivity(id: string) {
+		return this.request("GET", `/orgs/${id}/activity`);
+	}
+	orgVersions(id: string) {
+		return this.request("GET", `/orgs/${id}/versions`);
+	}
+	restoreOrgVersion(id: string, version: number) {
+		return this.request("POST", `/orgs/${id}/restore/${version}`);
+	}
+	/** Seed a pilot fleet + guardrails in an org and start a live run. */
+	runPilot(orgId: string, data: any) {
+		return this.request("POST", `/orgs/${orgId}/pilot`, data);
+	}
+	/** One call: fresh organization + fleet + guardrails + live pilot run. */
+	pilotBootstrap(data: any) {
+		return this.request("POST", "/pilot", data);
+	}
 
-	// Agents
-	listAgents(orgId?: string, mode?: string, environmentId?: string) {
-		const qs = new URLSearchParams();
-		if (orgId) qs.set("org_id", orgId);
-		if (mode) qs.set("mode", mode);
-		if (environmentId) qs.set("environment_id", environmentId);
-		const q = qs.toString();
-		return this.request("GET", `/agents${q ? `?${q}` : ""}`);
+	// ── Guardrail rules (env-owned, org-scoped store) ──
+	listOrgRules(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/rules`);
+	}
+	addOrgRule(orgId: string, rule: any) {
+		return this.request("POST", `/orgs/${orgId}/rules`, rule);
+	}
+	updateOrgRule(orgId: string, ruleId: string, data: any) {
+		return this.request("PUT", `/orgs/${orgId}/rules/${ruleId}`, data);
+	}
+	deleteOrgRule(orgId: string, ruleId: string) {
+		return this.request("DELETE", `/orgs/${orgId}/rules/${ruleId}`);
+	}
+
+	// ── Agents ──
+	listAgents(
+		orgId?: string,
+		mode?: string,
+		environmentId?: string,
+		status?: string,
+	) {
+		return this.request(
+			"GET",
+			`/agents${qs({ org_id: orgId, mode, environment_id: environmentId, status })}`,
+		);
 	}
 	createAgent(data: any) {
 		return this.request("POST", "/agents", data);
@@ -81,8 +138,12 @@ export class KreditAPI {
 	deleteAgent(id: string) {
 		return this.request("DELETE", `/agents/${id}`);
 	}
+	/** Publish a draft agent so it may act outside sandbox environments. */
+	publishAgent(id: string) {
+		return this.request("POST", `/agents/${id}/publish`);
+	}
 
-	// Rules
+	// ── Per-agent match-pattern rules ──
 	listRules(agentId: string) {
 		return this.request("GET", `/agents/${agentId}/rules`);
 	}
@@ -96,7 +157,7 @@ export class KreditAPI {
 		return this.request("DELETE", `/agents/${agentId}/rules/${ruleId}`);
 	}
 
-	// Check & Report
+	// ── Check & Report ──
 	check(data: any) {
 		return this.request("POST", "/check", data);
 	}
@@ -104,7 +165,7 @@ export class KreditAPI {
 		return this.request("POST", "/report", data);
 	}
 
-	// Score & Spend
+	// ── Score & Spend ──
 	getScore(agentId: string) {
 		return this.request("GET", `/agents/${agentId}/score`);
 	}
@@ -112,85 +173,89 @@ export class KreditAPI {
 		return this.request("GET", `/agents/${agentId}/spend`);
 	}
 
-	// Wallet
-	getWallet(agentId: string) {
-		return this.request("GET", `/wallets/${agentId}`);
-	}
-	updateWallet(agentId: string, data: any) {
-		return this.request("PUT", `/wallets/${agentId}`, data);
-	}
-
-	// Fleet
-	fleetOverview(mode?: string, environmentId?: string) {
-		const qs = new URLSearchParams();
-		if (mode) qs.set("mode", mode);
-		if (environmentId) qs.set("environment_id", environmentId);
-		const q = qs.toString();
-		return this.request("GET", `/fleet/overview${q ? `?${q}` : ""}`);
+	// ── Fleet ──
+	fleetOverview(orgId?: string, mode?: string, environmentId?: string) {
+		return this.request(
+			"GET",
+			`/fleet/overview${qs({ org_id: orgId, mode, environment_id: environmentId })}`,
+		);
 	}
 
-	// Transactions
+	// ── Transactions ──
 	listTransactions(params?: any) {
-		const qs = new URLSearchParams();
-		if (params?.agent_id) qs.set("agent_id", params.agent_id);
-		if (params?.status) qs.set("status", params.status);
-		if (params?.limit) qs.set("limit", String(params.limit));
-		if (params?.mode) qs.set("mode", params.mode);
-		if (params?.environment_id) qs.set("environment_id", params.environment_id);
-		const q = qs.toString();
-		return this.request("GET", `/transactions${q ? `?${q}` : ""}`);
+		return this.request(
+			"GET",
+			`/transactions${qs({
+				org_id: params?.org_id,
+				agent_id: params?.agent_id,
+				status: params?.status,
+				risk_level: params?.risk_level,
+				limit: params?.limit,
+				mode: params?.mode,
+				environment_id: params?.environment_id,
+				simulation_id: params?.simulation_id,
+			})}`,
+		);
 	}
 
-	// Events
+	// ── Events ──
 	listEvents(agentId: string, eventType?: string) {
-		const q = eventType ? `?event_type=${eventType}` : "";
-		return this.request("GET", `/agents/${agentId}/events${q}`);
+		return this.request(
+			"GET",
+			`/agents/${agentId}/events${qs({ event_type: eventType })}`,
+		);
 	}
 
-	// ── Sandboxes (environment containers) ──
-	listSandboxes() {
-		return this.request("GET", "/sandboxes");
+	// ── Environments (mode lives here: sandbox | preview | production) ──
+	listEnvironments(orgId: string) {
+		return this.request("GET", `/environments${qs({ org_id: orgId })}`);
 	}
-	createSandbox(data: any) {
-		return this.request("POST", "/sandboxes", data);
+	createEnvironment(data: any) {
+		return this.request("POST", "/environments", data);
 	}
-	getSandbox(id: string) {
-		return this.request("GET", `/sandboxes/${id}`);
+	getEnvironment(id: string) {
+		return this.request("GET", `/environments/${id}`);
 	}
-	updateSandbox(id: string, data: any) {
-		return this.request("PUT", `/sandboxes/${id}`, data);
+	deleteEnvironment(id: string) {
+		return this.request("DELETE", `/environments/${id}`);
 	}
-	deleteSandbox(id: string) {
-		return this.request("DELETE", `/sandboxes/${id}`);
+	/** The full environment manifest: fleet, rules, priors, audit, activity. */
+	environmentBundle(id: string) {
+		return this.request("GET", `/environments/${id}/bundle`);
 	}
-	copySandbox(id: string, name: string) {
-		return this.request("POST", `/sandboxes/${id}/copy`, { name });
+	/** Copy an environment's whole state into a fresh sandbox-mode clone. */
+	cloneEnvironment(id: string) {
+		return this.request("POST", `/environments/${id}/clone`);
 	}
-	promotePreview(id: string) {
-		return this.request("POST", `/sandboxes/${id}/promote/preview`);
+	resetEnvironment(id: string) {
+		return this.request("POST", `/environments/${id}/reset`);
 	}
-	promoteProduction(id: string) {
-		return this.request("POST", `/sandboxes/${id}/promote/production`);
+	/** Make this environment the org's live/default API target. */
+	goLiveEnvironment(id: string) {
+		return this.request("POST", `/environments/${id}/go-live`);
 	}
-	sandboxVersions(id: string) {
-		return this.request("GET", `/sandboxes/${id}/versions`);
+	promoteEnvironmentToMode(id: string, mode: string) {
+		return this.request("POST", `/environments/${id}/promote-to-mode/${mode}`);
 	}
-	switchVersion(id: string, version: number) {
-		return this.request("POST", `/sandboxes/${id}/switch/${version}`);
+	promoteEnvironmentTo(sourceId: string, targetId: string) {
+		return this.request("POST", `/environments/${sourceId}/promote-to/${targetId}`);
 	}
-	deployMode(id: string, data: any) {
-		return this.request("POST", `/sandboxes/${id}/deploy`, data);
+	environmentVersions(id: string) {
+		return this.request("GET", `/environments/${id}/versions`);
+	}
+	snapshotEnvironment(id: string, reason?: string) {
+		return this.request("POST", `/environments/${id}/snapshot${qs({ reason })}`);
+	}
+	restoreEnvironment(id: string, version: number) {
+		return this.request("POST", `/environments/${id}/restore/${version}`);
 	}
 
 	// ── Simulations ──
 	runSimulation(data: any) {
 		return this.request("POST", "/simulations/run", data);
 	}
-	listSimulations(sandboxId?: string) {
-		return this.request(
-			"GET",
-			`/simulations${sandboxId ? `?sandbox_id=${sandboxId}` : ""}`,
-		);
+	listSimulations(orgId?: string) {
+		return this.request("GET", `/simulations${qs({ org_id: orgId })}`);
 	}
 	getSimulation(id: string) {
 		return this.request("GET", `/simulations/${id}`);
@@ -203,19 +268,14 @@ export class KreditAPI {
 	getPriorPresets() {
 		return this.request("GET", "/priors/presets");
 	}
-	listPriors(sandboxId: string, mode?: string, environmentId?: string) {
-		const qs = new URLSearchParams();
-		qs.set("sandbox_id", sandboxId);
-		if (mode) qs.set("mode", mode);
-		if (environmentId) qs.set("environment_id", environmentId);
-		return this.request("GET", `/priors?${qs.toString()}`);
-	}
-	createPrior(sandboxId: string, data: any) {
+	listPriors(orgId?: string, mode?: string, environmentId?: string) {
 		return this.request(
-			"POST",
-			`/priors?sandbox_id=${encodeURIComponent(sandboxId)}`,
-			data,
+			"GET",
+			`/priors${qs({ org_id: orgId, mode, environment_id: environmentId })}`,
 		);
+	}
+	createPrior(orgId: string | undefined, data: any) {
+		return this.request("POST", `/priors${qs({ org_id: orgId })}`, data);
 	}
 	updatePrior(priorId: string, data: any) {
 		return this.request("PUT", `/priors/${priorId}`, data);
@@ -224,13 +284,9 @@ export class KreditAPI {
 		return this.request("DELETE", `/priors/${priorId}`);
 	}
 
-	// ── Workflows ──
-	listWorkflows(sandboxId: string, mode?: string, environmentId?: string) {
-		const qs = new URLSearchParams();
-		qs.set("sandbox_id", sandboxId);
-		if (mode) qs.set("mode", mode);
-		if (environmentId) qs.set("environment_id", environmentId);
-		return this.request("GET", `/workflows?${qs.toString()}`);
+	// ── Workflows (org-level definitions; the env is chosen at run time) ──
+	listWorkflows(orgId?: string) {
+		return this.request("GET", `/workflows${qs({ org_id: orgId })}`);
 	}
 	createWorkflow(data: any) {
 		return this.request("POST", "/workflows", data);
@@ -244,16 +300,16 @@ export class KreditAPI {
 	deleteWorkflow(id: string) {
 		return this.request("DELETE", `/workflows/${id}`);
 	}
-	simulateWorkflow(id: string, seed?: number) {
+	simulateWorkflow(id: string, seed?: number, environmentId?: string) {
 		return this.request(
 			"POST",
-			`/workflows/${id}/simulate${seed !== undefined ? `?seed=${seed}` : ""}`,
+			`/workflows/${id}/simulate${qs({ seed, environment_id: environmentId })}`,
 		);
 	}
-	executeWorkflow(id: string, seed?: number) {
+	executeWorkflow(id: string, seed?: number, environmentId?: string) {
 		return this.request(
 			"POST",
-			`/workflows/${id}/execute${seed !== undefined ? `?seed=${seed}` : ""}`,
+			`/workflows/${id}/execute${qs({ seed, environment_id: environmentId })}`,
 		);
 	}
 	listWorkflowRuns(id: string) {
@@ -263,29 +319,9 @@ export class KreditAPI {
 		return this.request("GET", `/workflows/runs/${runId}`);
 	}
 
-	// ── Environments ──
-	listEnvironments(sandboxId: string) {
-		return this.request(
-			"GET",
-			`/environments?sandbox_id=${encodeURIComponent(sandboxId)}`,
-		);
-	}
-	createEnvironment(data: any) {
-		return this.request("POST", "/environments", data);
-	}
-	getEnvironment(id: string) {
-		return this.request("GET", `/environments/${id}`);
-	}
-	deleteEnvironment(id: string) {
-		return this.request("DELETE", `/environments/${id}`);
-	}
-
 	// ── Chats ──
-	listChats(sandboxId?: string) {
-		return this.request(
-			"GET",
-			`/chats${sandboxId ? `?sandbox_id=${encodeURIComponent(sandboxId)}` : ""}`,
-		);
+	listChats(orgId?: string) {
+		return this.request("GET", `/chats${qs({ org_id: orgId })}`);
 	}
 	createChat(data: any) {
 		return this.request("POST", "/chats", data);
@@ -298,10 +334,10 @@ export class KreditAPI {
 	}
 
 	// ── Integrations ──
-	listIntegrations(sandboxId?: string) {
+	listIntegrations(orgId?: string, environmentId?: string) {
 		return this.request(
 			"GET",
-			`/integrations${sandboxId ? `?sandbox_id=${sandboxId}` : ""}`,
+			`/integrations${qs({ org_id: orgId, environment_id: environmentId })}`,
 		);
 	}
 
