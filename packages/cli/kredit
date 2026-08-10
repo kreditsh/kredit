@@ -661,8 +661,8 @@ stream_simulation() {
   # Ctrl-C (or TERM) → stop the server-side run, then leave.
   trap 'echo ""; curl -s -X POST "${BASE_URL}/simulations/${sim_id}/stop" -H "Authorization: Bearer ${API_KEY}" >/dev/null 2>&1; echo "  stopped simulation '"${sim_id}"'"; exit 0' INT TERM
 
-  printf "  %-18s %-26s %10s   %-8s  %s\n" "AGENT" "ACTION" "COST" "STATUS" "REASON"
-  echo "  ───────────────────────────────────────────────────────────────────────────────────"
+  printf "  %-22s %-28s %10s %6s   %-8s  %s\n" "AGENT" "ACTION" "COST" "RISK" "STATUS" "REASON"
+  echo "  ──────────────────────────────────────────────────────────────────────────────────────────────"
 
   curl -sN "${BASE_URL}/simulations/${sim_id}/stream" \
     -H "Authorization: Bearer ${API_KEY}" \
@@ -678,17 +678,21 @@ stream_simulation() {
       type=$(printf '%s' "$json" | jq -r '.type // empty' 2>/dev/null)
       case "$type" in
         action)
-          local agent action cost status reason
+          local agent action cost risk status reason
           agent=$(printf '%s'  "$json" | jq -r '.action.agent_name // "-"' 2>/dev/null)
           action=$(printf '%s' "$json" | jq -r '.action.action // "-"' 2>/dev/null)
           cost=$(printf '%s'   "$json" | jq -r '.action.cost // 0' 2>/dev/null)
+          # this ACTION's risk score, not the agent's kredit score
+          risk=$(printf '%s'   "$json" | jq -r '.action.card.risk_score // "-"' 2>/dev/null)
           status=$(printf '%s' "$json" | jq -r '.action.card.status // "-"' 2>/dev/null)
           reason=$(printf '%s' "$json" | jq -r '.action.card.block_reason // ""' 2>/dev/null)
-          printf "  %-18s %-26s \$%9s   %-8s  %s\n" \
-            "$agent" "$action" "$cost" "$status" "$reason"
+          # truncate to the column width — an over-long name or action id would
+          # otherwise push every later column out of line with the header
+          printf "  %-22s %-28s \$%9s %6s   %-8s  %s\n" \
+            "${agent:0:22}" "${action:0:28}" "$cost" "$risk" "$status" "$reason"
           ;;
         done)
-          echo "  ───────────────────────────────────────────────────────────────────────────────────"
+          echo "  ──────────────────────────────────────────────────────────────────────────────────────────────"
           break
           ;;
       esac
