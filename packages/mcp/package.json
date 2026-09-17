@@ -1,6 +1,6 @@
 {
 	"name": "kredit-mcp",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "MCP server for Kredit \u2014 org-scoped agent spend controls for Claude Code and Claude Desktop",
 	"type": "module",
 	"main": "dist/index.js",

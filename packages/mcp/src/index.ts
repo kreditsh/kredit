@@ -62,8 +62,135 @@ const WINDOW = [
 	"year",
 ] as const;
 
+const SERVER_INSTRUCTIONS = `Kredit is the risk intelligence layer for AI agents that spend money.
+
+Two tool families:
+- kredit_* tools operate on the org/environment/rule surface.
+- kredit_platform_* tools operate on the organization-first platform, the
+  API root. Call kredit_platform_check BEFORE any payment, API call, or tool
+  call that spends money; it returns allow | deny | review with nine risk layers.
+
+Changes made through MCP (kredit_platform_create_agent,
+kredit_platform_propose_version) are created as PENDING versions. A human must
+approve them on the platform with a passkey before the agent can act.`;
+
+// ── Platform shared schemas ──
+const PLATFORM_PENDING_NOTE =
+	"Creates the agent as a PENDING version; a human must approve it on the platform with a passkey before it can act.";
+
+const platformToolSchema = z.object({
+	name: z.string().describe("Tool name, e.g. 'store_checkout'"),
+	kind: z
+		.enum(["mcp", "api", "integration", "builtin"])
+		.describe("Where the tool runs"),
+	provider: z
+		.string()
+		.optional()
+		.describe("Provider key for integration tools, e.g. 'skyfire'"),
+	scopes: z
+		.array(z.string())
+		.describe("Scopes the tool grants, e.g. ['payment.card']"),
+	description: z.string().describe("What the tool does"),
+});
+
+const platformRuleSchema = z.object({
+	name: z.string().describe("Rule name, e.g. 'Payment cap'"),
+	type: z
+		.enum(["payment", "api", "tool"])
+		.describe("The action kind this rule governs"),
+	providers: z
+		.array(z.string())
+		.optional()
+		.describe("Providers covered, e.g. ['stripe','visa']. Empty = all."),
+	spend: z
+		.object({
+			amount: z.number().describe("Cap in dollars (0 = no cap)"),
+			window: z.enum(WINDOW),
+		})
+		.nullable()
+		.optional()
+		.describe("Spend cap over a rolling window"),
+	hit_rate: z
+		.object({
+			count: z.number().int().describe("Max calls (0 = no cap)"),
+			window: z.enum(WINDOW),
+		})
+		.nullable()
+		.optional()
+		.describe("Call-count cap over a rolling window"),
+	allowed: z
+		.array(z.string())
+		.optional()
+		.describe("If non-empty, ONLY these actions/providers are permitted"),
+	blocked: z
+		.array(z.string())
+		.optional()
+		.describe("These actions/providers are always denied"),
+	enabled: z.boolean().optional().describe("Default true"),
+	on_hit: z
+		.enum(["deny", "review"])
+		.optional()
+		.describe("Outcome when the rule hits (default deny)"),
+});
+
+const platformGuardrailsSchema = z.object({
+	max_per_action: z.number().optional().describe("Dollars"),
+	daily_budget: z.number().optional().describe("Dollars"),
+	monthly_budget: z.number().optional().describe("Dollars"),
+	require_review_above: z.number().optional().describe("Dollars"),
+	allowed_merchants: z.array(z.string()).optional(),
+	blocked_merchants: z.array(z.string()).optional(),
+	allowed_categories: z.array(z.string()).optional(),
+});
+
+/** An intent in words, plus whatever structure the caller states outright.
+ * The platform reads action, amount, merchant and rail from the words. */
+const platformIntentFields = {
+	intent: z
+		.string()
+		.min(2)
+		.describe(
+			"What the agent wants to do, in words, e.g. 'buy running shoes from nike.com for $139 by card'",
+		),
+	action: z
+		.string()
+		.optional()
+		.describe("Action name, e.g. 'payment.card', 'payment.usdc', 'api.call'; read from the intent when omitted"),
+	amount: z.number().optional().describe("Amount in dollars; read from the intent when omitted"),
+	currency: z.string().optional().describe("Default USD"),
+	merchant: z
+		.object({
+			name: z.string(),
+			domain: z.string().optional(),
+			category: z.string().optional(),
+		})
+		.optional(),
+	counterparty: z.string().optional(),
+	payment_rail: z
+		.enum(["card", "usdc", "skyfire", "kite", "ach", "wire", "crypto"])
+		.optional(),
+	metadata: z.record(z.string(), z.unknown()).optional(),
+};
+
+const platformSessionField = () =>
+	z
+		.record(z.string(), z.unknown())
+		.optional()
+		.describe(
+			"Session telemetry for the fraud layer: {device_id?, ip?, user_agent?, fingerprint?, telemetry?}",
+		);
+
+const platformEnvField = () =>
+	z
+		.enum(["sandbox", "production"])
+		.optional()
+		.describe("Platform environment (default sandbox)");
+
 function createServer(api: KreditAPI): McpServer {
-	const server = new McpServer({ name: "kredit", version: "0.6.0" });
+	const server = new McpServer(
+		{ name: "kredit", version: "0.7.0" },
+		{ instructions: SERVER_INSTRUCTIONS },
+	);
 
 	// ── Organizations (the top-level tenant) ──
 	tool(
@@ -171,7 +298,9 @@ function createServer(api: KreditAPI): McpServer {
 			name: z
 				.string()
 				.optional()
-				.describe("Name for the new organization (only when org_id is omitted)"),
+				.describe(
+					"Name for the new organization (only when org_id is omitted)",
+				),
 		},
 		({ org_id, environment_id, agent_count, integrations, name }) =>
 			org_id
@@ -300,7 +429,9 @@ function createServer(api: KreditAPI): McpServer {
 			budget: z
 				.number()
 				.optional()
-				.describe("Spend cap in dollars — materialized as an agent-scoped rule"),
+				.describe(
+					"Spend cap in dollars — materialized as an agent-scoped rule",
+				),
 			budget_window: z
 				.enum(WINDOW)
 				.optional()
@@ -622,7 +753,9 @@ function createServer(api: KreditAPI): McpServer {
 				.describe("Scope to one agent; omit for a fleet-wide prior"),
 			mode: modeField(),
 			environment_id: environmentIdField(),
-			frequency_mean: z.number().describe("Expected number of calls per period"),
+			frequency_mean: z
+				.number()
+				.describe("Expected number of calls per period"),
 			frequency_variance: z
 				.number()
 				.optional()
@@ -720,7 +853,9 @@ function createServer(api: KreditAPI): McpServer {
 		id: z.string().describe("Unique node id within the workflow"),
 		type: z
 			.enum(["agent", "llm", "api", "tool", "payment"])
-			.describe("Node type; api/tool/payment nodes need a matching integration"),
+			.describe(
+				"Node type; api/tool/payment nodes need a matching integration",
+			),
 		label: z.string().describe("Human-readable node label"),
 		integration: z
 			.string()
@@ -932,6 +1067,183 @@ function createServer(api: KreditAPI): McpServer {
 				.describe("Write the tightened rules (false = dry run)"),
 		},
 		(args) => api.optimize(args),
+	);
+
+	// ── Platform: organization-first, human-approved ──
+	tool(
+		server,
+		"kredit_platform_orgs",
+		"List the organizations you own or belong to on the Kredit platform. Each org carries its KYB status.",
+		{},
+		() => api.platformOrgs(),
+	);
+	tool(
+		server,
+		"kredit_platform_seed",
+		"Create the Kredit demo organization with five partner agents (Skyfire, VGS, Circle, Kite AI, Sardine), sanctions/policy/vendor documents, and simulated integrations. Idempotent. Returns {org_id, agent_ids}.",
+		{},
+		() => api.platformSeed(),
+	);
+	tool(
+		server,
+		"kredit_platform_summary",
+		"Organization summary: agent count, pending versions, pending reviews, today's decisions by outcome, spend today, average check latency, integrations connected.",
+		{ org_id: z.string() },
+		({ org_id }) => api.platformSummary(org_id),
+	);
+	tool(
+		server,
+		"kredit_platform_agents",
+		"List an organization's platform agents with their identity (KYA), active versions per environment, pending version, and decision stats.",
+		{ org_id: z.string() },
+		({ org_id }) => api.platformAgents(org_id),
+	);
+	tool(
+		server,
+		"kredit_platform_agent",
+		"Get one platform agent: prompt, tools, rules, guardrails for every version, plus KYA status and stats.",
+		{ agent_id: z.string() },
+		({ agent_id }) => api.platformAgent(agent_id),
+	);
+	tool(
+		server,
+		"kredit_platform_create_agent",
+		`Create an agent on the Kredit platform with a prompt, tools, rules, and guardrails. ${PLATFORM_PENDING_NOTE}`,
+		{
+			org_id: z.string(),
+			name: z.string().describe("Agent name (unique per organization)"),
+			description: z.string().optional(),
+			prompt: z
+				.string()
+				.describe("The agent's operating brief / system prompt"),
+			tools: z.array(platformToolSchema).optional(),
+			rules: z.array(platformRuleSchema).optional(),
+			guardrails: platformGuardrailsSchema.optional(),
+		},
+		({ org_id, ...data }) => api.platformCreateAgent(org_id, data),
+	);
+	tool(
+		server,
+		"kredit_platform_propose_version",
+		`Propose a new version of a platform agent (prompt, tools, rules, guardrails). Fields omitted are copied from the latest version. ${PLATFORM_PENDING_NOTE}`,
+		{
+			agent_id: z.string(),
+			prompt: z.string().optional(),
+			tools: z.array(platformToolSchema).optional(),
+			rules: z.array(platformRuleSchema).optional(),
+			guardrails: platformGuardrailsSchema.optional(),
+			note: z.string().optional().describe("Why this version is proposed"),
+		},
+		({ agent_id, ...data }) => api.platformProposeVersion(agent_id, data),
+	);
+	tool(
+		server,
+		"kredit_platform_check",
+		"Ask Kredit whether an agent may act. Returns allow | deny | review with the nine risk layers and latency. Call this BEFORE any payment, API call, or tool call that spends money.",
+		{
+			org_id: z.string().optional(),
+			agent_id: z.string(),
+			environment: platformEnvField(),
+			...platformIntentFields,
+			session: platformSessionField(),
+		},
+		(args) => api.platformCheck(args),
+	);
+	tool(
+		server,
+		"kredit_platform_decisions",
+		"List an organization's decisions (newest first), optionally filtered by agent and outcome.",
+		{
+			org_id: z.string(),
+			agent_id: z.string().optional(),
+			outcome: z.enum(["allow", "deny", "review"]).optional(),
+			limit: z.number().int().optional().describe("Default 50"),
+		},
+		({ org_id, ...params }) => api.platformDecisions(org_id, params),
+	);
+	tool(
+		server,
+		"kredit_platform_reviews",
+		"List decisions awaiting human review (outcome review, review.status pending). Approval requires a passkey on the platform.",
+		{ org_id: z.string() },
+		({ org_id }) => api.platformReviews(org_id),
+	);
+	tool(
+		server,
+		"kredit_platform_documents",
+		"List an organization's documents (sanctions lists, policies, vendor lists, contracts). Content is truncated in the list.",
+		{ org_id: z.string() },
+		({ org_id }) => api.platformDocuments(org_id),
+	);
+	tool(
+		server,
+		"kredit_platform_search_documents",
+		"Search an organization's documents by term. Returns {id, name, snippet, score} per match.",
+		{ org_id: z.string(), q: z.string().describe("Search terms") },
+		({ org_id, q }) => api.platformSearchDocuments(org_id, q),
+	);
+	tool(
+		server,
+		"kredit_platform_add_document",
+		"Add a document to an organization. kind 'url' is fetched and stripped to text server-side; kind 'text' stores content as given. Tag it 'sanctions' to feed the compliance layer.",
+		{
+			org_id: z.string(),
+			name: z.string(),
+			kind: z.enum(["url", "text"]),
+			url: z.string().optional().describe("Required when kind is url"),
+			content: z.string().optional().describe("Required when kind is text"),
+			tags: z
+				.array(z.string())
+				.optional()
+				.describe("sanctions | policy | kyb | contract | vendors | other"),
+		},
+		({ org_id, ...data }) => api.platformAddDocument(org_id, data),
+	);
+	tool(
+		server,
+		"kredit_platform_integrations",
+		"List an organization's partner integrations (skyfire, kite, sardine, vgs, circle, stripe, shopify) with mode simulated | sandbox | live.",
+		{ org_id: z.string() },
+		({ org_id }) => api.platformIntegrations(org_id),
+	);
+	tool(
+		server,
+		"kredit_platform_store_products",
+		"List the Kredit demo store catalog: 12 products across api_credits, cloud, saas, hardware, gift_cards, travel, data, advertising.",
+		{},
+		() => api.platformStoreProducts(),
+	);
+	tool(
+		server,
+		"kredit_platform_checkout",
+		"Buy from the Kredit demo store as an agent. Runs the risk check first; returns {order, decision}.",
+		{
+			org_id: z.string().optional(),
+			agent_id: z.string(),
+			product_id: z.string(),
+			qty: z.number().int().optional().describe("Default 1"),
+			environment: platformEnvField(),
+			payment: z
+				.object({
+					rail: z
+						.enum(["card", "usdc", "skyfire", "kite", "ach", "wire"])
+						.optional(),
+					token: z.string().optional(),
+				})
+				.optional(),
+			session: platformSessionField(),
+		},
+		(args) => api.platformCheckout(args),
+	);
+	tool(
+		server,
+		"kredit_platform_audit",
+		"The organization's audit trail (newest first): agent versions proposed/approved, decisions, reviews, documents, integrations, passkeys, orders.",
+		{
+			org_id: z.string(),
+			limit: z.number().int().optional().describe("Default 100"),
+		},
+		({ org_id, limit }) => api.platformAudit(org_id, limit),
 	);
 
 	return server;

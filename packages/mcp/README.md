@@ -42,6 +42,36 @@ Each organization gets those three standard environments, and every simulation
 run is its own throwaway `sandbox` environment cloned from its parent — so a run
 never touches the live fleet.
 
+## Platform tools (`kredit_platform_*`)
+
+The `kredit_platform_*` tools operate on the organization-first platform, the
+API root. Every call sends `X-Kredit-Source: mcp`, so changes made from MCP
+(`kredit_platform_create_agent`, `kredit_platform_propose_version`) are created
+as **pending** versions: a human must approve them on the platform with a
+passkey before the agent can act. Call `kredit_platform_check` before any
+payment, API call, or tool call that spends money.
+
+| Tool | Description |
+|------|-------------|
+| `kredit_platform_orgs` | List your platform organizations (with KYB status) |
+| `kredit_platform_seed` | Create the Kredit demo org with five partner agents (idempotent) |
+| `kredit_platform_summary` | Agents, pending versions/reviews, today's decisions, spend, latency |
+| `kredit_platform_agents` | List an org's agents: KYA, active versions, pending version, stats |
+| `kredit_platform_agent` | One agent with every version's prompt, tools, rules, guardrails |
+| `kredit_platform_create_agent` | Create an agent (prompt, tools, rules, guardrails) as a pending version |
+| `kredit_platform_propose_version` | Propose a new version of an agent (pending until approved) |
+| `kredit_platform_check` | allow / deny / review with the nine risk layers and latency |
+| `kredit_platform_decisions` | Decisions newest first, filter by agent and outcome |
+| `kredit_platform_reviews` | Decisions awaiting human review |
+| `kredit_platform_documents` / `kredit_platform_search_documents` / `kredit_platform_add_document` | Sanctions lists, policies, vendor lists |
+| `kredit_platform_integrations` | Partner integrations and their mode (simulated / sandbox / live) |
+| `kredit_platform_store_products` | The demo store catalog |
+| `kredit_platform_checkout` | Buy from the demo store as an agent: risk check first, returns `{order, decision}` |
+| `kredit_platform_audit` | The org's audit trail |
+
+`kredit_platform_check`, `kredit_platform_checkout`, and `kredit_platform_seed`
+have a 30s timeout; every other tool keeps the 5s default.
+
 ## Tools
 
 ### Organizations

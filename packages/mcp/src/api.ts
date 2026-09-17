@@ -1,6 +1,17 @@
 import type { Config } from "./config.js";
 
 const TIMEOUT_MS = 5_000;
+/** Longer budget for platform calls that run the nine risk layers or seed. */
+const PLATFORM_SLOW_TIMEOUT_MS = 30_000;
+
+/** Every platform request identifies its origin so the platform can mark proposals as MCP-sourced. */
+const PLATFORM_SOURCE_HEADER = "X-Kredit-Source";
+const PLATFORM_SOURCE = "mcp";
+
+interface RequestOptions {
+	timeoutMs?: number;
+	headers?: Record<string, string>;
+}
 
 /** Build a `?a=1&b=2` suffix from defined values (empty string when none). */
 function qs(params: Record<string, unknown>): string {
@@ -29,15 +40,24 @@ export class KreditAPI {
 		this.apiKey = config.apiKey;
 	}
 
-	async request(method: string, path: string, body?: unknown): Promise<any> {
+	async request(
+		method: string,
+		path: string,
+		body?: unknown,
+		opts: RequestOptions = {},
+	): Promise<any> {
 		const url = `${this.baseUrl}${path}`;
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
+			...(opts.headers ?? {}),
 		};
 		if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
 
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+		const timeout = setTimeout(
+			() => controller.abort(),
+			opts.timeoutMs ?? TIMEOUT_MS,
+		);
 
 		try {
 			const res = await fetch(url, {
@@ -54,6 +74,99 @@ export class KreditAPI {
 		} finally {
 			clearTimeout(timeout);
 		}
+	}
+
+	/**
+	 * A platform request (the platform is the API root). Always sends `X-Kredit-Source: mcp` so the
+	 * platform records MCP-originated changes as pending proposals.
+	 */
+	platform(
+		method: string,
+		path: string,
+		body?: unknown,
+		opts: RequestOptions = {},
+	): Promise<any> {
+		return this.request(method, path, body, {
+			...opts,
+			headers: {
+				[PLATFORM_SOURCE_HEADER]: PLATFORM_SOURCE,
+				...(opts.headers ?? {}),
+			},
+		});
+	}
+
+	// ── Platform: organization-first, human-approved ──
+	platformOrgs() {
+		return this.platform("GET", "/orgs");
+	}
+	/** Idempotent: the "Kredit" demo org with five partner agents + docs. */
+	platformSeed() {
+		return this.platform("POST", "/seed", undefined, {
+			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
+		});
+	}
+	platformSummary(orgId: string) {
+		return this.platform("GET", `/orgs/${orgId}/summary`);
+	}
+	platformAgents(orgId: string) {
+		return this.platform("GET", `/orgs/${orgId}/agents`);
+	}
+	platformAgent(agentId: string) {
+		return this.platform("GET", `/agents/${agentId}`);
+	}
+	/** Without a verified session the first version is created PENDING. */
+	platformCreateAgent(orgId: string, data: any) {
+		return this.platform("POST", `/orgs/${orgId}/agents`, data);
+	}
+	/** Without a verified session the new version is PENDING until approved. */
+	platformProposeVersion(agentId: string, data: any) {
+		return this.platform("POST", `/agents/${agentId}/versions`, data);
+	}
+	/** The nine-layer risk check. Slow budget: layers may call providers. */
+	platformCheck(data: any) {
+		return this.platform("POST", "/check", data, {
+			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
+		});
+	}
+	platformDecisions(
+		orgId: string,
+		params?: { agent_id?: string; outcome?: string; limit?: number },
+	) {
+		return this.platform(
+			"GET",
+			`/orgs/${orgId}/decisions${qs({
+				agent_id: params?.agent_id,
+				outcome: params?.outcome,
+				limit: params?.limit,
+			})}`,
+		);
+	}
+	platformReviews(orgId: string) {
+		return this.platform("GET", `/orgs/${orgId}/reviews`);
+	}
+	platformDocuments(orgId: string) {
+		return this.platform("GET", `/orgs/${orgId}/documents`);
+	}
+	platformSearchDocuments(orgId: string, q: string) {
+		return this.platform("GET", `/orgs/${orgId}/documents/search${qs({ q })}`);
+	}
+	platformAddDocument(orgId: string, data: any) {
+		return this.platform("POST", `/orgs/${orgId}/documents`, data);
+	}
+	platformIntegrations(orgId: string) {
+		return this.platform("GET", `/orgs/${orgId}/integrations`);
+	}
+	platformStoreProducts() {
+		return this.platform("GET", "/store/products");
+	}
+	/** Runs the risk check, then executes when allowed. Returns {order, decision}. */
+	platformCheckout(data: any) {
+		return this.platform("POST", "/store/checkout", data, {
+			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
+		});
+	}
+	platformAudit(orgId: string, limit?: number) {
+		return this.platform("GET", `/orgs/${orgId}/audit${qs({ limit })}`);
 	}
 
 	// ── Organizations (the top-level tenant) ──
@@ -238,13 +351,19 @@ export class KreditAPI {
 		return this.request("POST", `/environments/${id}/promote-to-mode/${mode}`);
 	}
 	promoteEnvironmentTo(sourceId: string, targetId: string) {
-		return this.request("POST", `/environments/${sourceId}/promote-to/${targetId}`);
+		return this.request(
+			"POST",
+			`/environments/${sourceId}/promote-to/${targetId}`,
+		);
 	}
 	environmentVersions(id: string) {
 		return this.request("GET", `/environments/${id}/versions`);
 	}
 	snapshotEnvironment(id: string, reason?: string) {
-		return this.request("POST", `/environments/${id}/snapshot${qs({ reason })}`);
+		return this.request(
+			"POST",
+			`/environments/${id}/snapshot${qs({ reason })}`,
+		);
 	}
 	restoreEnvironment(id: string, version: number) {
 		return this.request("POST", `/environments/${id}/restore/${version}`);
