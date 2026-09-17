@@ -648,7 +648,7 @@ kredit_banner() {
   echo "  ║    kredit rules    add spend rules — per-txn caps, daily & rate limits  ║"
   echo "  ║    kredit check    score a transaction's risk before it runs            ║"
   echo "  ║                                                                         ║"
-  echo "  ║  Dashboard:  https://kredit.sh/platform                                 ║"
+  echo "  ║  Dashboard:  https://kredit.sh/console                                  ║"
   echo "  ╚═════════════════════════════════════════════════════════════════════════╝"
   echo ""
 }
@@ -791,7 +791,7 @@ cmd_pilot() {
   # ── [3/3] Live simulation, streamed into the terminal ─────────────────────
   echo "[3/3] Running the pilot simulation (Ctrl-C to stop)..."
   echo ""
-  local url="${DASHBOARD_URL}/platform/environments/${env_id}"
+  local url="${DASHBOARD_URL}/console"
   echo "  Opening the run's environment: $url"
   open_url "$url"
   echo ""
@@ -858,7 +858,7 @@ cmd_sim() {
       sim_id=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
       [ -z "$sim_id" ] && die "Failed to start simulation: $resp"
       sim_env=$(printf '%s' "$resp" | jq -r '.environment_id // empty' 2>/dev/null)
-      local url="${DASHBOARD_URL}/platform/environments/${sim_env}"
+      local url="${DASHBOARD_URL}/console"
       echo "  Opening the run's environment: $url"
       open_url "$url"
       echo ""
