@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 
 describe("resolveConfig", () => {
 	const originalEnv = { ...process.env };
 
 	beforeEach(() => {
-		delete process.env.KREDIT_API_KEY;
-		delete process.env.KREDIT_API_URL;
+		Reflect.deleteProperty(process.env, "KREDIT_API_KEY");
+		Reflect.deleteProperty(process.env, "KREDIT_API_URL");
 	});
 
 	afterEach(() => {

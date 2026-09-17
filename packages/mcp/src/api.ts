@@ -1,16 +1,39 @@
 import type { Config } from "./config.js";
 
-const TIMEOUT_MS = 5_000;
-/** Longer budget for platform calls that run the nine risk layers or seed. */
-const PLATFORM_SLOW_TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 10_000;
+/** The check runs nine risk layers; seeding builds a whole demo organization. */
+const SLOW_TIMEOUT_MS = 30_000;
 
-/** Every platform request identifies its origin so the platform can mark proposals as MCP-sourced. */
-const PLATFORM_SOURCE_HEADER = "X-Kredit-Source";
-const PLATFORM_SOURCE = "mcp";
+/** Every request says where it came from, so policy changes made here are recorded as MCP-sourced. */
+const SOURCE_HEADER = "X-Kredit-Source";
+const SOURCE = "mcp";
+
+export type Json = Record<string, unknown>;
+export type Window =
+	| "txn"
+	| "sec"
+	| "min"
+	| "hr"
+	| "day"
+	| "wk"
+	| "mo"
+	| "quarter"
+	| "year";
+
+/** A failed request: the HTTP status and the server's `detail` when it gave one. */
+export class KreditError extends Error {
+	readonly status: number;
+	readonly detail: string;
+	constructor(status: number, detail: string) {
+		super(`${status}: ${detail}`);
+		this.name = "KreditError";
+		this.status = status;
+		this.detail = detail;
+	}
+}
 
 interface RequestOptions {
 	timeoutMs?: number;
-	headers?: Record<string, string>;
 }
 
 /** Build a `?a=1&b=2` suffix from defined values (empty string when none). */
@@ -23,13 +46,23 @@ function qs(params: Record<string, unknown>): string {
 	return s ? `?${s}` : "";
 }
 
+function detailOf(text: string, statusText: string): string {
+	try {
+		const parsed = JSON.parse(text);
+		if (parsed && typeof parsed === "object" && "detail" in parsed) {
+			const d = (parsed as { detail: unknown }).detail;
+			return typeof d === "string" ? d : JSON.stringify(d);
+		}
+	} catch {
+		// not JSON: fall through to the raw text
+	}
+	return text || statusText || "request failed";
+}
+
 /**
- * The Kredit REST surface.
- *
- * Organizations are the top-level tenant: they own agents, environments,
- * workflows and rules. `org_id` is optional on every org-scoped call — the
- * server falls back to the user's ACTIVATED organization (see `activateOrg`).
- * Mode lives on environments, never on the organization.
+ * The Kredit API. Paths are at the root of the API host. Authenticates with
+ * an API key (kr_live_) or an agent token (kat_). An agent token may only
+ * check its own intents, read its own agent, and rotate its own token.
  */
 export class KreditAPI {
 	private baseUrl: string;
@@ -45,435 +78,282 @@ export class KreditAPI {
 		path: string,
 		body?: unknown,
 		opts: RequestOptions = {},
-	): Promise<any> {
+	): Promise<Json> {
 		const url = `${this.baseUrl}${path}`;
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
-			...(opts.headers ?? {}),
+			[SOURCE_HEADER]: SOURCE,
 		};
-		if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
+		if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
 		const controller = new AbortController();
 		const timeout = setTimeout(
 			() => controller.abort(),
 			opts.timeoutMs ?? TIMEOUT_MS,
 		);
-
 		try {
 			const res = await fetch(url, {
 				method,
 				headers,
-				body: body ? JSON.stringify(body) : undefined,
+				body: body === undefined ? undefined : JSON.stringify(body),
 				signal: controller.signal,
 			});
 			if (!res.ok) {
 				const text = await res.text().catch(() => "");
-				throw new Error(`${res.status} ${res.statusText}: ${text}`);
+				throw new KreditError(res.status, detailOf(text, res.statusText));
 			}
-			return await res.json();
+			if (res.status === 204) return {};
+			return (await res.json()) as Json;
 		} finally {
 			clearTimeout(timeout);
 		}
 	}
 
-	/**
-	 * A platform request (the platform is the API root). Always sends `X-Kredit-Source: mcp` so the
-	 * platform records MCP-originated changes as pending proposals.
-	 */
-	platform(
-		method: string,
-		path: string,
-		body?: unknown,
-		opts: RequestOptions = {},
-	): Promise<any> {
-		return this.request(method, path, body, {
-			...opts,
-			headers: {
-				[PLATFORM_SOURCE_HEADER]: PLATFORM_SOURCE,
-				...(opts.headers ?? {}),
-			},
-		});
+	// ── session ──
+	session() {
+		return this.request("GET", "/session");
 	}
 
-	// ── Platform: organization-first, human-approved ──
-	platformOrgs() {
-		return this.platform("GET", "/orgs");
-	}
-	/** Idempotent: the "Kredit" demo org with five partner agents + docs. */
-	platformSeed() {
-		return this.platform("POST", "/seed", undefined, {
-			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
-		});
-	}
-	platformSummary(orgId: string) {
-		return this.platform("GET", `/orgs/${orgId}/summary`);
-	}
-	platformAgents(orgId: string) {
-		return this.platform("GET", `/orgs/${orgId}/agents`);
-	}
-	platformAgent(agentId: string) {
-		return this.platform("GET", `/agents/${agentId}`);
-	}
-	/** Without a verified session the first version is created PENDING. */
-	platformCreateAgent(orgId: string, data: any) {
-		return this.platform("POST", `/orgs/${orgId}/agents`, data);
-	}
-	/** Without a verified session the new version is PENDING until approved. */
-	platformProposeVersion(agentId: string, data: any) {
-		return this.platform("POST", `/agents/${agentId}/versions`, data);
-	}
-	/** The nine-layer risk check. Slow budget: layers may call providers. */
-	platformCheck(data: any) {
-		return this.platform("POST", "/check", data, {
-			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
-		});
-	}
-	platformDecisions(
-		orgId: string,
-		params?: { agent_id?: string; outcome?: string; limit?: number },
-	) {
-		return this.platform(
-			"GET",
-			`/orgs/${orgId}/decisions${qs({
-				agent_id: params?.agent_id,
-				outcome: params?.outcome,
-				limit: params?.limit,
-			})}`,
-		);
-	}
-	platformReviews(orgId: string) {
-		return this.platform("GET", `/orgs/${orgId}/reviews`);
-	}
-	platformDocuments(orgId: string) {
-		return this.platform("GET", `/orgs/${orgId}/documents`);
-	}
-	platformSearchDocuments(orgId: string, q: string) {
-		return this.platform("GET", `/orgs/${orgId}/documents/search${qs({ q })}`);
-	}
-	platformAddDocument(orgId: string, data: any) {
-		return this.platform("POST", `/orgs/${orgId}/documents`, data);
-	}
-	platformIntegrations(orgId: string) {
-		return this.platform("GET", `/orgs/${orgId}/integrations`);
-	}
-	platformStoreProducts() {
-		return this.platform("GET", "/store/products");
-	}
-	/** Runs the risk check, then executes when allowed. Returns {order, decision}. */
-	platformCheckout(data: any) {
-		return this.platform("POST", "/store/checkout", data, {
-			timeoutMs: PLATFORM_SLOW_TIMEOUT_MS,
-		});
-	}
-	platformAudit(orgId: string, limit?: number) {
-		return this.platform("GET", `/orgs/${orgId}/audit${qs({ limit })}`);
-	}
-
-	// ── Organizations (the top-level tenant) ──
+	// ── organizations ──
 	listOrgs() {
 		return this.request("GET", "/orgs");
 	}
-	createOrg(name: string, config?: unknown) {
-		return this.request("POST", "/orgs", {
-			name,
-			...(config ? { config } : {}),
+	getOrg(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}`);
+	}
+	createOrg(data: Json) {
+		return this.request("POST", "/orgs", data);
+	}
+	updateOrg(orgId: string, data: Json) {
+		return this.request("PUT", `/orgs/${orgId}`, data);
+	}
+	deleteOrg(orgId: string) {
+		return this.request("DELETE", `/orgs/${orgId}`);
+	}
+	orgSummary(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/summary`);
+	}
+	/** Idempotent: the demo organization with its agents, documents and workflows. */
+	seed() {
+		return this.request("POST", "/seed", undefined, {
+			timeoutMs: SLOW_TIMEOUT_MS,
 		});
 	}
-	getOrg(id: string) {
-		return this.request("GET", `/orgs/${id}`);
-	}
-	updateOrg(id: string, data: any) {
-		return this.request("PUT", `/orgs/${id}`, data);
-	}
-	deleteOrg(id: string) {
-		return this.request("DELETE", `/orgs/${id}`);
-	}
-	/** Point this API key (and the kredit agent) at one organization. */
-	activateOrg(id: string) {
-		return this.request("POST", `/orgs/${id}/activate`);
-	}
-	resetOrg(id: string) {
-		return this.request("POST", `/orgs/${id}/reset`);
-	}
-	orgActivity(id: string) {
-		return this.request("GET", `/orgs/${id}/activity`);
-	}
-	orgVersions(id: string) {
-		return this.request("GET", `/orgs/${id}/versions`);
-	}
-	restoreOrgVersion(id: string, version: number) {
-		return this.request("POST", `/orgs/${id}/restore/${version}`);
-	}
-	/** Seed a pilot fleet + guardrails in an org and start a live run. */
-	runPilot(orgId: string, data: any) {
-		return this.request("POST", `/orgs/${orgId}/pilot`, data);
-	}
-	/** One call: fresh organization + fleet + guardrails + live pilot run. */
-	pilotBootstrap(data: any) {
-		return this.request("POST", "/pilot", data);
-	}
 
-	// ── Guardrail rules (env-owned, org-scoped store) ──
-	listOrgRules(orgId: string) {
+	// ── organization rules ──
+	listRules(orgId: string) {
 		return this.request("GET", `/orgs/${orgId}/rules`);
 	}
-	addOrgRule(orgId: string, rule: any) {
-		return this.request("POST", `/orgs/${orgId}/rules`, rule);
+	addRule(orgId: string, data: Json) {
+		return this.request("POST", `/orgs/${orgId}/rules`, data);
 	}
-	updateOrgRule(orgId: string, ruleId: string, data: any) {
+	updateRule(orgId: string, ruleId: string, data: Json) {
 		return this.request("PUT", `/orgs/${orgId}/rules/${ruleId}`, data);
 	}
-	deleteOrgRule(orgId: string, ruleId: string) {
+	deleteRule(orgId: string, ruleId: string) {
 		return this.request("DELETE", `/orgs/${orgId}/rules/${ruleId}`);
 	}
 
-	// ── Agents ──
-	listAgents(
-		orgId?: string,
-		mode?: string,
-		environmentId?: string,
-		status?: string,
+	// ── agents ──
+	listAgents(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/agents`);
+	}
+	getAgent(agentId: string) {
+		return this.request("GET", `/agents/${agentId}`);
+	}
+	createAgent(orgId: string, data: Json) {
+		return this.request("POST", `/orgs/${orgId}/agents`, data);
+	}
+	updateAgent(agentId: string, data: Json) {
+		return this.request("PUT", `/agents/${agentId}`, data);
+	}
+	deleteAgent(agentId: string) {
+		return this.request("DELETE", `/agents/${agentId}`);
+	}
+	proposeVersion(agentId: string, data: Json) {
+		return this.request("POST", `/agents/${agentId}/versions`, data);
+	}
+	approveVersion(agentId: string, versionId: string, environment?: string) {
+		return this.request(
+			"POST",
+			`/agents/${agentId}/versions/${versionId}/approve`,
+			environment ? { environment } : {},
+		);
+	}
+	rejectVersion(agentId: string, versionId: string, note?: string) {
+		return this.request(
+			"POST",
+			`/agents/${agentId}/versions/${versionId}/reject`,
+			note ? { note } : {},
+		);
+	}
+	promoteAgent(agentId: string) {
+		return this.request("POST", `/agents/${agentId}/promote`, {
+			environment: "production",
+		});
+	}
+	verifyAgent(agentId: string, provider?: string) {
+		return this.request(
+			"POST",
+			`/agents/${agentId}/verify-identity`,
+			provider ? { provider } : {},
+		);
+	}
+	agentDecisions(agentId: string, limit?: number, before?: string) {
+		return this.request(
+			"GET",
+			`/agents/${agentId}/decisions${qs({ limit, before })}`,
+		);
+	}
+
+	// ── agent tokens ──
+	issueAgentToken(agentId: string, ttlMinutes?: number) {
+		return this.request(
+			"POST",
+			`/agents/${agentId}/tokens`,
+			ttlMinutes ? { ttl_minutes: ttlMinutes } : {},
+		);
+	}
+	listAgentTokens(agentId: string) {
+		return this.request("GET", `/agents/${agentId}/tokens`);
+	}
+	revokeAgentToken(agentId: string, tokenId: string) {
+		return this.request("DELETE", `/agents/${agentId}/tokens/${tokenId}`);
+	}
+
+	// ── the check ──
+	check(data: Json) {
+		return this.request(
+			"POST",
+			"/check",
+			{ ...data, source: "mcp" },
+			{ timeoutMs: SLOW_TIMEOUT_MS },
+		);
+	}
+
+	// ── decisions ──
+	listDecisions(
+		orgId: string,
+		filters: {
+			agent_id?: string;
+			outcome?: string;
+			environment?: string;
+			limit?: number;
+			before?: string;
+		} = {},
 	) {
+		return this.request("GET", `/orgs/${orgId}/decisions${qs(filters)}`);
+	}
+	getDecision(decisionId: string) {
+		return this.request("GET", `/decisions/${decisionId}`);
+	}
+	listReviews(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/reviews`);
+	}
+	executeDecision(decisionId: string) {
+		return this.request("POST", `/decisions/${decisionId}/execute`, {});
+	}
+
+	// ── approvals (policy changes waiting for a person) ──
+	listApprovals(orgId: string, status?: string) {
+		return this.request("GET", `/orgs/${orgId}/approvals${qs({ status })}`);
+	}
+
+	// ── documents ──
+	listDocuments(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/documents`);
+	}
+	addDocument(orgId: string, data: Json) {
+		return this.request("POST", `/orgs/${orgId}/documents`, data, {
+			timeoutMs: SLOW_TIMEOUT_MS,
+		});
+	}
+	searchDocuments(orgId: string, q: string) {
+		return this.request("GET", `/orgs/${orgId}/documents/search${qs({ q })}`);
+	}
+	deleteDocument(docId: string) {
+		return this.request("DELETE", `/documents/${docId}`);
+	}
+
+	// ── integrations ──
+	listIntegrations(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/integrations`);
+	}
+	updateIntegration(orgId: string, provider: string, data: Json) {
+		return this.request("PUT", `/orgs/${orgId}/integrations/${provider}`, data);
+	}
+	testIntegration(orgId: string, provider: string) {
 		return this.request(
-			"GET",
-			`/agents${qs({ org_id: orgId, mode, environment_id: environmentId, status })}`,
-		);
-	}
-	createAgent(data: any) {
-		return this.request("POST", "/agents", data);
-	}
-	getAgent(id: string) {
-		return this.request("GET", `/agents/${id}`);
-	}
-	updateAgent(id: string, data: any) {
-		return this.request("PUT", `/agents/${id}`, data);
-	}
-	deleteAgent(id: string) {
-		return this.request("DELETE", `/agents/${id}`);
-	}
-	/** Publish a draft agent so it may act outside sandbox environments. */
-	publishAgent(id: string) {
-		return this.request("POST", `/agents/${id}/publish`);
-	}
-
-	// ── Per-agent match-pattern rules ──
-	listRules(agentId: string) {
-		return this.request("GET", `/agents/${agentId}/rules`);
-	}
-	addRule(agentId: string, rule: any) {
-		return this.request("POST", `/agents/${agentId}/rules`, rule);
-	}
-	updateRule(agentId: string, ruleId: string, data: any) {
-		return this.request("PUT", `/agents/${agentId}/rules/${ruleId}`, data);
-	}
-	deleteRule(agentId: string, ruleId: string) {
-		return this.request("DELETE", `/agents/${agentId}/rules/${ruleId}`);
-	}
-
-	// ── Check & Report ──
-	check(data: any) {
-		return this.request("POST", "/check", data);
-	}
-	report(data: any) {
-		return this.request("POST", "/report", data);
-	}
-
-	// ── Score & Spend ──
-	getScore(agentId: string) {
-		return this.request("GET", `/agents/${agentId}/score`);
-	}
-	getSpend(agentId: string) {
-		return this.request("GET", `/agents/${agentId}/spend`);
-	}
-
-	// ── Fleet ──
-	fleetOverview(orgId?: string, mode?: string, environmentId?: string) {
-		return this.request(
-			"GET",
-			`/fleet/overview${qs({ org_id: orgId, mode, environment_id: environmentId })}`,
+			"POST",
+			`/orgs/${orgId}/integrations/${provider}/test`,
+			{},
+			{ timeoutMs: SLOW_TIMEOUT_MS },
 		);
 	}
 
-	// ── Transactions ──
-	listTransactions(params?: any) {
+	// ── audit and orders ──
+	audit(orgId: string, limit?: number, before?: string, action?: string) {
 		return this.request(
 			"GET",
-			`/transactions${qs({
-				org_id: params?.org_id,
-				agent_id: params?.agent_id,
-				status: params?.status,
-				risk_level: params?.risk_level,
-				limit: params?.limit,
-				mode: params?.mode,
-				environment_id: params?.environment_id,
-				simulation_id: params?.simulation_id,
-			})}`,
+			`/orgs/${orgId}/audit${qs({ limit, before, action })}`,
 		);
 	}
-
-	// ── Events ──
-	listEvents(agentId: string, eventType?: string) {
-		return this.request(
-			"GET",
-			`/agents/${agentId}/events${qs({ event_type: eventType })}`,
-		);
+	listOrders(orgId: string, limit?: number) {
+		return this.request("GET", `/orgs/${orgId}/orders${qs({ limit })}`);
 	}
 
-	// ── Environments (mode lives here: sandbox | preview | production) ──
+	// ── environments and simulations ──
 	listEnvironments(orgId: string) {
-		return this.request("GET", `/environments${qs({ org_id: orgId })}`);
+		return this.request("GET", `/orgs/${orgId}/environments`);
 	}
-	createEnvironment(data: any) {
-		return this.request("POST", "/environments", data);
+	createEnvironment(orgId: string, name: string) {
+		return this.request("POST", `/orgs/${orgId}/environments`, { name });
 	}
-	getEnvironment(id: string) {
-		return this.request("GET", `/environments/${id}`);
+	deleteEnvironment(envId: string) {
+		return this.request("DELETE", `/environments/${envId}`);
 	}
-	deleteEnvironment(id: string) {
-		return this.request("DELETE", `/environments/${id}`);
+	runSimulation(orgId: string, data: Json) {
+		return this.request("POST", `/orgs/${orgId}/simulations/run`, data, {
+			timeoutMs: SLOW_TIMEOUT_MS,
+		});
 	}
-	/** The full environment manifest: fleet, rules, priors, audit, activity. */
-	environmentBundle(id: string) {
-		return this.request("GET", `/environments/${id}/bundle`);
+	listSimulations(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/simulations`);
 	}
-	/** Copy an environment's whole state into a fresh sandbox-mode clone. */
-	cloneEnvironment(id: string) {
-		return this.request("POST", `/environments/${id}/clone`);
+	getSimulation(simId: string) {
+		return this.request("GET", `/simulations/${simId}`);
 	}
-	resetEnvironment(id: string) {
-		return this.request("POST", `/environments/${id}/reset`);
-	}
-	/** Make this environment the org's live/default API target. */
-	goLiveEnvironment(id: string) {
-		return this.request("POST", `/environments/${id}/go-live`);
-	}
-	promoteEnvironmentToMode(id: string, mode: string) {
-		return this.request("POST", `/environments/${id}/promote-to-mode/${mode}`);
-	}
-	promoteEnvironmentTo(sourceId: string, targetId: string) {
-		return this.request(
-			"POST",
-			`/environments/${sourceId}/promote-to/${targetId}`,
-		);
-	}
-	environmentVersions(id: string) {
-		return this.request("GET", `/environments/${id}/versions`);
-	}
-	snapshotEnvironment(id: string, reason?: string) {
-		return this.request(
-			"POST",
-			`/environments/${id}/snapshot${qs({ reason })}`,
-		);
-	}
-	restoreEnvironment(id: string, version: number) {
-		return this.request("POST", `/environments/${id}/restore/${version}`);
+	stopSimulation(simId: string) {
+		return this.request("POST", `/simulations/${simId}/stop`, {});
 	}
 
-	// ── Simulations ──
-	runSimulation(data: any) {
-		return this.request("POST", "/simulations/run", data);
+	// ── agentic commerce ──
+	listWorkflows(orgId: string) {
+		return this.request("GET", `/orgs/${orgId}/commerce/workflows`);
 	}
-	listSimulations(orgId?: string) {
-		return this.request("GET", `/simulations${qs({ org_id: orgId })}`);
+	updateWorkflow(workflowId: string, data: Json) {
+		return this.request("PUT", `/commerce/workflows/${workflowId}`, data);
 	}
-	getSimulation(id: string) {
-		return this.request("GET", `/simulations/${id}`);
+	startRun(orgId: string, data: Json) {
+		return this.request("POST", `/orgs/${orgId}/commerce/runs`, data);
 	}
-	stopSimulation(id: string) {
-		return this.request("POST", `/simulations/${id}/stop`);
+	listRuns(orgId: string, limit?: number) {
+		return this.request("GET", `/orgs/${orgId}/commerce/runs${qs({ limit })}`);
 	}
-
-	// ── Priors ──
-	getPriorPresets() {
-		return this.request("GET", "/priors/presets");
+	getRun(runId: string) {
+		return this.request("GET", `/commerce/runs/${runId}`);
 	}
-	listPriors(orgId?: string, mode?: string, environmentId?: string) {
-		return this.request(
-			"GET",
-			`/priors${qs({ org_id: orgId, mode, environment_id: environmentId })}`,
-		);
+	chooseOption(runId: string, findId: string | null) {
+		return this.request("POST", `/commerce/runs/${runId}/choose`, {
+			find_id: findId,
+		});
 	}
-	createPrior(orgId: string | undefined, data: any) {
-		return this.request("POST", `/priors${qs({ org_id: orgId })}`, data);
+	rechooseOption(runId: string, findId: string) {
+		return this.request("POST", `/commerce/runs/${runId}/rechoose`, {
+			find_id: findId,
+		});
 	}
-	updatePrior(priorId: string, data: any) {
-		return this.request("PUT", `/priors/${priorId}`, data);
-	}
-	deletePrior(priorId: string) {
-		return this.request("DELETE", `/priors/${priorId}`);
-	}
-
-	// ── Workflows (org-level definitions; the env is chosen at run time) ──
-	listWorkflows(orgId?: string) {
-		return this.request("GET", `/workflows${qs({ org_id: orgId })}`);
-	}
-	createWorkflow(data: any) {
-		return this.request("POST", "/workflows", data);
-	}
-	getWorkflow(id: string) {
-		return this.request("GET", `/workflows/${id}`);
-	}
-	updateWorkflow(id: string, data: any) {
-		return this.request("PUT", `/workflows/${id}`, data);
-	}
-	deleteWorkflow(id: string) {
-		return this.request("DELETE", `/workflows/${id}`);
-	}
-	simulateWorkflow(id: string, seed?: number, environmentId?: string) {
-		return this.request(
-			"POST",
-			`/workflows/${id}/simulate${qs({ seed, environment_id: environmentId })}`,
-		);
-	}
-	executeWorkflow(id: string, seed?: number, environmentId?: string) {
-		return this.request(
-			"POST",
-			`/workflows/${id}/execute${qs({ seed, environment_id: environmentId })}`,
-		);
-	}
-	listWorkflowRuns(id: string) {
-		return this.request("GET", `/workflows/${id}/runs`);
-	}
-	getWorkflowRun(runId: string) {
-		return this.request("GET", `/workflows/runs/${runId}`);
-	}
-
-	// ── Chats ──
-	listChats(orgId?: string) {
-		return this.request("GET", `/chats${qs({ org_id: orgId })}`);
-	}
-	createChat(data: any) {
-		return this.request("POST", "/chats", data);
-	}
-	getChat(id: string) {
-		return this.request("GET", `/chats/${id}`);
-	}
-	deleteChat(id: string) {
-		return this.request("DELETE", `/chats/${id}`);
-	}
-
-	// ── Integrations ──
-	listIntegrations(orgId?: string, environmentId?: string) {
-		return this.request(
-			"GET",
-			`/integrations${qs({ org_id: orgId, environment_id: environmentId })}`,
-		);
-	}
-
-	// ── Action verbs ──
-	actionIntent(data: any) {
-		return this.request("POST", "/actions/intent", data);
-	}
-	executeAction(data: any) {
-		return this.request("POST", "/actions/execute", data);
-	}
-	run(data: any) {
-		return this.request("POST", "/actions/run", data);
-	}
-	scoreTrust(agentId: string) {
-		return this.request("POST", "/actions/score", { agent_id: agentId });
-	}
-	optimize(data: any) {
-		return this.request("POST", "/actions/optimize", data);
+	stopRun(runId: string) {
+		return this.request("POST", `/commerce/runs/${runId}/stop`, {});
 	}
 }

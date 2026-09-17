@@ -12,10 +12,10 @@ const args = process.argv.slice(2);
 const command = args[0];
 
 if (!command || command === "serve") {
-  // Import and run the server entry point — it reads config from process.argv
+  // Import and run the server entry point: it reads config from process.argv
   await import(resolve(__dirname, "../dist/index.js"));
 } else if (command === "--help" || command === "-h") {
-  console.log(`kredit-mcp — MCP server for Kredit
+  console.log(`kredit-mcp: MCP server for Kredit
 
 Usage:
   kredit-mcp serve [options]

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { KreditAPI } from "../src/api.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { KreditAPI, KreditError } from "../src/api.js";
 
 function mockFetch(responseBody: unknown, status = 200) {
 	return vi.fn().mockResolvedValue({
@@ -11,903 +11,364 @@ function mockFetch(responseBody: unknown, status = 200) {
 	});
 }
 
-describe("KreditAPI", () => {
-	const config = {
-		apiKey: "kr_live_test",
-		apiUrl: "https://api.kredit.sh",
-	};
+const config = { apiKey: "kr_live_test", apiUrl: "https://api.kredit.sh/" };
 
+/** Run one API call against a mocked fetch and return what was sent. */
+async function sent(
+	call: (api: KreditAPI) => Promise<unknown>,
+	response: unknown = { ok: true },
+) {
+	const fetchMock = mockFetch(response);
+	vi.stubGlobal("fetch", fetchMock);
+	const result = await call(new KreditAPI(config));
+	const [url, opts] = fetchMock.mock.calls[0];
+	return {
+		result,
+		url: url as string,
+		method: opts.method as string,
+		headers: opts.headers as Record<string, string>,
+		body: opts.body ? JSON.parse(opts.body) : undefined,
+	};
+}
+
+describe("KreditAPI", () => {
 	beforeEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	describe("check", () => {
-		it("sends POST /check with correct body and headers", async () => {
-			const body = {
-				transaction_id: "txn_123",
-				status: "allowed",
-				risk_level: "low",
-				block_reason: null,
-				agent_status: "active",
-				credit_score: 750,
-			};
-			const fetchMock = mockFetch(body);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.check({
-				agent_id: "agent_1",
-				action: "openai.chat",
-				estimated_cost: 5.0,
+	describe("request", () => {
+		it("sends the bearer key, the MCP source header, and JSON", async () => {
+			const r = await sent((api) => api.createOrg({ name: "Acme" }), {
+				id: "o1",
 			});
+			expect(r.url).toBe("https://api.kredit.sh/orgs");
+			expect(r.method).toBe("POST");
+			expect(r.headers.Authorization).toBe("Bearer kr_live_test");
+			expect(r.headers["X-Kredit-Source"]).toBe("mcp");
+			expect(r.headers["Content-Type"]).toBe("application/json");
+			expect(r.body).toEqual({ name: "Acme" });
+			expect(r.result).toEqual({ id: "o1" });
+		});
 
-			expect(result.status).toBe("allowed");
-			expect(result.credit_score).toBe(750);
+		it("sends no body on GET", async () => {
+			const r = await sent((api) => api.listOrgs(), []);
+			expect(r.method).toBe("GET");
+			expect(r.body).toBeUndefined();
+		});
 
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/check");
-			expect(opts.method).toBe("POST");
-			expect(opts.headers["Authorization"]).toBe("Bearer kr_live_test");
-			expect(JSON.parse(opts.body)).toEqual({
-				agent_id: "agent_1",
-				action: "openai.chat",
-				estimated_cost: 5.0,
+		it("works with an agent token too", async () => {
+			const fetchMock = mockFetch({ outcome: "allow" });
+			vi.stubGlobal("fetch", fetchMock);
+			const api = new KreditAPI({ ...config, apiKey: "kat_abc" });
+			await api.check({ agent_id: "a1", intent: "buy shoes for $120" });
+			expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+				"Bearer kat_abc",
+			);
+		});
+
+		it("raises a KreditError carrying the status and the server's detail", async () => {
+			vi.stubGlobal("fetch", mockFetch({ detail: "the agent is frozen" }, 403));
+			const api = new KreditAPI(config);
+			const err = await api.getAgent("a1").catch((e) => e);
+			expect(err).toBeInstanceOf(KreditError);
+			expect(err.status).toBe(403);
+			expect(err.detail).toBe("the agent is frozen");
+			expect(err.message).toBe("403: the agent is frozen");
+		});
+
+		it("falls back to the raw text when the error is not JSON", async () => {
+			vi.stubGlobal("fetch", {
+				...mockFetch({}, 502),
 			});
-		});
-	});
-
-	describe("report", () => {
-		it("sends POST /report with correct body", async () => {
-			const fetchMock = mockFetch({ ok: true, credit_score: 760 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.report({
-				transaction_id: "txn_123",
-				outcome: "success",
-				actual_cost: 4.2,
-			});
-
-			expect(result.ok).toBe(true);
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/report");
-			expect(opts.method).toBe("POST");
-		});
-	});
-
-	// ── Organizations (the top-level tenant) ──
-
-	describe("listOrgs", () => {
-		it("sends GET /orgs", async () => {
-			const fetchMock = mockFetch([{ id: "org_1", active: true }]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.listOrgs();
-
-			expect(result[0].active).toBe(true);
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs");
-			expect(opts.method).toBe("GET");
-		});
-	});
-
-	describe("createOrg", () => {
-		it("sends POST /orgs with the name", async () => {
-			const fetchMock = mockFetch({ id: "org_1", name: "acme" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.createOrg("acme");
-
-			expect(result.id).toBe("org_1");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs");
-			expect(JSON.parse(opts.body)).toEqual({ name: "acme" });
-		});
-
-		it("includes config in the body when provided", async () => {
-			const fetchMock = mockFetch({ id: "org_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.createOrg("acme", { auto_load_rules: false });
-
-			const [, opts] = fetchMock.mock.calls[0];
-			expect(JSON.parse(opts.body)).toEqual({
-				name: "acme",
-				config: { auto_load_rules: false },
-			});
-		});
-	});
-
-	describe("activateOrg", () => {
-		it("sends POST /orgs/:id/activate", async () => {
-			const fetchMock = mockFetch({ id: "org_1", active: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.activateOrg("org_1");
-
-			expect(result.active).toBe(true);
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1/activate");
-			expect(opts.method).toBe("POST");
-		});
-	});
-
-	describe("updateOrg / deleteOrg / resetOrg", () => {
-		it("sends PUT /orgs/:id with body", async () => {
-			const fetchMock = mockFetch({ id: "org_1", name: "renamed" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.updateOrg("org_1", { name: "renamed" });
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1");
-			expect(opts.method).toBe("PUT");
-			expect(JSON.parse(opts.body)).toEqual({ name: "renamed" });
-		});
-
-		it("sends DELETE /orgs/:id", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.deleteOrg("org_1");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1");
-			expect(opts.method).toBe("DELETE");
-		});
-
-		it("sends POST /orgs/:id/reset", async () => {
-			const fetchMock = mockFetch({ ok: true, agents_reset: 3 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.resetOrg("org_1");
-
-			expect(result.agents_reset).toBe(3);
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/orgs/org_1/reset",
-			);
-		});
-	});
-
-	describe("org versions", () => {
-		it("sends GET /orgs/:id/versions", async () => {
-			const fetchMock = mockFetch({ current: 2, versions: [] });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.orgVersions("org_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/orgs/org_1/versions",
-			);
-		});
-
-		it("sends POST /orgs/:id/restore/:version", async () => {
-			const fetchMock = mockFetch({ id: "org_1" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.restoreOrgVersion("org_1", 3);
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1/restore/3");
-			expect(opts.method).toBe("POST");
-		});
-	});
-
-	// ── Pilot ──
-
-	describe("pilot", () => {
-		it("seeds an existing org via POST /orgs/:id/pilot", async () => {
-			const fetchMock = mockFetch({ ok: true, environment_id: "env_9" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.runPilot("org_1", { agent_count: 5 });
-
-			expect(result.environment_id).toBe("env_9");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1/pilot");
-			expect(JSON.parse(opts.body)).toEqual({ agent_count: 5 });
-		});
-
-		it("bootstraps a fresh org via POST /pilot", async () => {
-			const fetchMock = mockFetch({ ok: true, org_id: "org_new" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.pilotBootstrap({ agent_count: 10 });
-
-			expect(result.org_id).toBe("org_new");
-			expect(fetchMock.mock.calls[0][0]).toBe("https://api.kredit.sh/pilot");
-		});
-	});
-
-	// ── Guardrail rules ──
-
-	describe("org rules", () => {
-		it("sends GET /orgs/:id/rules", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listOrgRules("org_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/orgs/org_1/rules",
-			);
-		});
-
-		it("sends POST /orgs/:id/rules with the rule scope", async () => {
-			const fetchMock = mockFetch({ id: "rule_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.addOrgRule("org_1", {
-				name: "Payment cap",
-				type: "payment",
-				spend: { amount: 500, window: "day" },
-				environment_id: "env_1",
-				agent_id: "agent_1",
-			});
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/orgs/org_1/rules");
-			expect(opts.method).toBe("POST");
-			expect(JSON.parse(opts.body)).toEqual({
-				name: "Payment cap",
-				type: "payment",
-				spend: { amount: 500, window: "day" },
-				environment_id: "env_1",
-				agent_id: "agent_1",
-			});
-		});
-
-		it("sends PUT and DELETE /orgs/:id/rules/:ruleId", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.updateOrgRule("org_1", "rule_1", { enabled: false });
-			await api.deleteOrgRule("org_1", "rule_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/orgs/org_1/rules/rule_1",
-			);
-			expect(fetchMock.mock.calls[0][1].method).toBe("PUT");
-			expect(fetchMock.mock.calls[1][1].method).toBe("DELETE");
-		});
-	});
-
-	// ── Agents ──
-
-	describe("listAgents", () => {
-		it("sends GET /agents without params", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listAgents();
-
-			expect(fetchMock.mock.calls[0][0]).toBe("https://api.kredit.sh/agents");
-		});
-
-		it("sends GET /agents?org_id=... with org_id", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listAgents("org_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/agents?org_id=org_1",
-			);
-		});
-
-		it("includes mode, environment_id and status when provided", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listAgents("org_1", "sandbox", "env_1", "active");
-
-			const [url] = fetchMock.mock.calls[0];
-			expect(url).toContain("org_id=org_1");
-			expect(url).toContain("mode=sandbox");
-			expect(url).toContain("environment_id=env_1");
-			expect(url).toContain("status=active");
-		});
-	});
-
-	describe("createAgent", () => {
-		it("sends POST /agents with the budget convenience", async () => {
-			const fetchMock = mockFetch({ id: "agent_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.createAgent({
-				name: "checkout-bot",
-				org_id: "org_1",
-				priority: "critical",
-				budget: 8000,
-				budget_window: "mo",
-			});
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/agents");
-			expect(JSON.parse(opts.body)).toEqual({
-				name: "checkout-bot",
-				org_id: "org_1",
-				priority: "critical",
-				budget: 8000,
-				budget_window: "mo",
-			});
-		});
-	});
-
-	describe("getAgent", () => {
-		it("sends GET /agents/:id", async () => {
-			const fetchMock = mockFetch({ id: "agent_1", org_id: "org_1" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.getAgent("agent_1");
-
-			expect(result.org_id).toBe("org_1");
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/agents/agent_1",
-			);
-		});
-	});
-
-	describe("publishAgent", () => {
-		it("sends POST /agents/:id/publish", async () => {
-			const fetchMock = mockFetch({ id: "agent_1", is_published: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.publishAgent("agent_1");
-
-			expect(result.is_published).toBe(true);
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/agents/agent_1/publish",
-			);
-		});
-	});
-
-	// ── Fleet & transactions ──
-
-	describe("fleetOverview", () => {
-		it("scopes by org, mode and environment", async () => {
-			const fetchMock = mockFetch({ total_agents: 3 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.fleetOverview("org_1", "sandbox", "env_1");
-
-			const [url] = fetchMock.mock.calls[0];
-			expect(url).toContain("/fleet/overview?");
-			expect(url).toContain("org_id=org_1");
-			expect(url).toContain("mode=sandbox");
-			expect(url).toContain("environment_id=env_1");
-		});
-
-		it("sends no query string when unscoped", async () => {
-			const fetchMock = mockFetch({ total_agents: 0 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.fleetOverview();
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/fleet/overview",
-			);
-		});
-	});
-
-	describe("listTransactions", () => {
-		it("passes org, agent, simulation and status filters", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listTransactions({
-				org_id: "org_1",
-				agent_id: "agent_1",
-				simulation_id: "sim_1",
-				status: "blocked",
-				limit: 10,
-			});
-
-			const [url] = fetchMock.mock.calls[0];
-			expect(url).toContain("org_id=org_1");
-			expect(url).toContain("agent_id=agent_1");
-			expect(url).toContain("simulation_id=sim_1");
-			expect(url).toContain("status=blocked");
-			expect(url).toContain("limit=10");
-		});
-	});
-
-	// ── Environments ──
-
-	describe("listEnvironments", () => {
-		it("sends GET /environments?org_id=...", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listEnvironments("org_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/environments?org_id=org_1",
-			);
-		});
-	});
-
-	describe("createEnvironment", () => {
-		it("sends POST /environments with org_id and mode", async () => {
-			const fetchMock = mockFetch({ id: "env_1", mode: "sandbox" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.createEnvironment({
-				org_id: "org_1",
-				mode: "sandbox",
-				name: "exp-a",
-			});
-
-			expect(result.mode).toBe("sandbox");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/environments");
-			expect(JSON.parse(opts.body)).toEqual({
-				org_id: "org_1",
-				mode: "sandbox",
-				name: "exp-a",
-			});
-		});
-	});
-
-	describe("environmentBundle", () => {
-		it("sends GET /environments/:id/bundle", async () => {
-			const fetchMock = mockFetch({ org_id: "org_1", agents: [] });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.environmentBundle("env_1");
-
-			expect(result.org_id).toBe("org_1");
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/environments/env_1/bundle",
-			);
-		});
-	});
-
-	describe("cloneEnvironment", () => {
-		it("sends POST /environments/:id/clone", async () => {
-			const fetchMock = mockFetch({ id: "env_2", mode: "sandbox" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.cloneEnvironment("env_1");
-
-			expect(result.id).toBe("env_2");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/environments/env_1/clone");
-			expect(opts.method).toBe("POST");
-		});
-	});
-
-	describe("environment promote / go-live / versions", () => {
-		it("sends POST /environments/:id/promote-to-mode/:mode", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.promoteEnvironmentToMode("env_1", "production");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/environments/env_1/promote-to-mode/production",
-			);
-		});
-
-		it("sends POST /environments/:id/go-live", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.goLiveEnvironment("env_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/environments/env_1/go-live",
-			);
-		});
-
-		it("sends GET versions and POST restore", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.environmentVersions("env_1");
-			await api.restoreEnvironment("env_1", 2);
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/environments/env_1/versions",
-			);
-			expect(fetchMock.mock.calls[1][0]).toBe(
-				"https://api.kredit.sh/environments/env_1/restore/2",
-			);
-		});
-	});
-
-	describe("deleteEnvironment", () => {
-		it("sends DELETE /environments/:id", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.deleteEnvironment("env_1");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/environments/env_1");
-			expect(opts.method).toBe("DELETE");
-		});
-	});
-
-	// ── Simulations ──
-
-	describe("simulations", () => {
-		it("sends POST /simulations/run with org and environment scope", async () => {
-			const fetchMock = mockFetch(
-				{ id: "sim_1", environment_id: "env_9" },
-				201,
-			);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			const result = await api.runSimulation({
-				org_id: "org_1",
-				environment_id: "env_1",
-				mode: "realtime",
-				stream: true,
-			});
-
-			expect(result.environment_id).toBe("env_9");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/simulations/run");
-			expect(JSON.parse(opts.body)).toEqual({
-				org_id: "org_1",
-				environment_id: "env_1",
-				mode: "realtime",
-				stream: true,
-			});
-		});
-
-		it("sends GET /simulations?org_id=... when scoped", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listSimulations("org_1");
-			await api.listSimulations();
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/simulations?org_id=org_1",
-			);
-			expect(fetchMock.mock.calls[1][0]).toBe(
-				"https://api.kredit.sh/simulations",
-			);
-		});
-
-		it("sends POST /simulations/:id/stop", async () => {
-			const fetchMock = mockFetch({ ok: true, stopped: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.stopSimulation("sim_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/simulations/sim_1/stop",
-			);
-		});
-	});
-
-	// ── Priors ──
-
-	describe("listPriors", () => {
-		it("sends GET /priors with no scope", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listPriors();
-
-			expect(fetchMock.mock.calls[0][0]).toBe("https://api.kredit.sh/priors");
-		});
-
-		it("includes org_id, mode and environment_id when provided", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listPriors("org_1", "sandbox", "env_1");
-
-			const [url] = fetchMock.mock.calls[0];
-			expect(url).toContain("org_id=org_1");
-			expect(url).toContain("mode=sandbox");
-			expect(url).toContain("environment_id=env_1");
-		});
-	});
-
-	describe("createPrior", () => {
-		it("sends POST /priors?org_id=... with the body", async () => {
-			const fetchMock = mockFetch({ id: "prior_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.createPrior("org_1", {
-				name: "openai.chat",
-				frequency: { mean: 6, variance: 6 },
-				cost: { mean: 3, variance: 0.75 },
-			});
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/priors?org_id=org_1");
-			expect(opts.method).toBe("POST");
-			expect(JSON.parse(opts.body).name).toBe("openai.chat");
-		});
-
-		it("omits the query string when org_id is undefined", async () => {
-			const fetchMock = mockFetch({ id: "prior_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.createPrior(undefined, { name: "openai.chat" });
-
-			expect(fetchMock.mock.calls[0][0]).toBe("https://api.kredit.sh/priors");
-		});
-	});
-
-	describe("updatePrior / deletePrior / presets", () => {
-		it("sends PUT /priors/:id", async () => {
-			const fetchMock = mockFetch({ id: "prior_1" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.updatePrior("prior_1", { name: "renamed" });
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/priors/prior_1");
-			expect(opts.method).toBe("PUT");
-		});
-
-		it("sends DELETE /priors/:id", async () => {
-			const fetchMock = mockFetch({ ok: true });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.deletePrior("prior_1");
-
-			expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
-		});
-
-		it("sends GET /priors/presets", async () => {
-			const fetchMock = mockFetch({ "24x7": { dow: [], hour: [] } });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.getPriorPresets();
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/priors/presets",
-			);
-		});
-	});
-
-	// ── Workflows ──
-
-	describe("listWorkflows", () => {
-		it("sends GET /workflows?org_id=... when scoped", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listWorkflows("org_1");
-			await api.listWorkflows();
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/workflows?org_id=org_1",
-			);
-			expect(fetchMock.mock.calls[1][0]).toBe("https://api.kredit.sh/workflows");
-		});
-	});
-
-	describe("createWorkflow", () => {
-		it("sends POST /workflows with org_id in the body", async () => {
-			const fetchMock = mockFetch({ id: "wf_1" }, 201);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.createWorkflow({
-				org_id: "org_1",
-				name: "demo",
-				nodes: [{ id: "n1", type: "llm", label: "LLM" }],
-				edges: [],
-			});
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/workflows");
-			expect(JSON.parse(opts.body).org_id).toBe("org_1");
-		});
-	});
-
-	describe("simulateWorkflow / executeWorkflow", () => {
-		it("sends POST /workflows/:id/simulate without params", async () => {
-			const fetchMock = mockFetch({ node_count: 2 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.simulateWorkflow("wf_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/workflows/wf_1/simulate",
-			);
-		});
-
-		it("includes seed and environment_id as query params", async () => {
-			const fetchMock = mockFetch({ node_count: 2 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.simulateWorkflow("wf_1", 5, "env_1");
-			await api.executeWorkflow("wf_1", 7, "env_2");
-
-			const simUrl = fetchMock.mock.calls[0][0];
-			expect(simUrl).toContain("seed=5");
-			expect(simUrl).toContain("environment_id=env_1");
-
-			const execUrl = fetchMock.mock.calls[1][0];
-			expect(execUrl).toContain("/workflows/wf_1/execute?");
-			expect(execUrl).toContain("seed=7");
-			expect(execUrl).toContain("environment_id=env_2");
-		});
-	});
-
-	describe("workflow runs", () => {
-		it("sends GET /workflows/:id/runs and /workflows/runs/:runId", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listWorkflowRuns("wf_1");
-			await api.getWorkflowRun("run_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/workflows/wf_1/runs",
-			);
-			expect(fetchMock.mock.calls[1][0]).toBe(
-				"https://api.kredit.sh/workflows/runs/run_1",
-			);
-		});
-	});
-
-	// ── Chats & integrations ──
-
-	describe("listChats", () => {
-		it("sends GET /chats with and without org_id", async () => {
-			const fetchMock = mockFetch([]);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listChats();
-			await api.listChats("org_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe("https://api.kredit.sh/chats");
-			expect(fetchMock.mock.calls[1][0]).toBe(
-				"https://api.kredit.sh/chats?org_id=org_1",
-			);
-		});
-	});
-
-	describe("getChat / deleteChat", () => {
-		it("sends GET and DELETE /chats/:id", async () => {
-			const fetchMock = mockFetch({ id: "chat_1" });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.getChat("chat_1");
-			await api.deleteChat("chat_1");
-
-			expect(fetchMock.mock.calls[0][0]).toBe(
-				"https://api.kredit.sh/chats/chat_1",
-			);
-			expect(fetchMock.mock.calls[1][1].method).toBe("DELETE");
-		});
-	});
-
-	describe("listIntegrations", () => {
-		it("scopes by org and environment", async () => {
-			const fetchMock = mockFetch({ integrations: [] });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.listIntegrations("org_1", "env_1");
-
-			const [url] = fetchMock.mock.calls[0];
-			expect(url).toContain("org_id=org_1");
-			expect(url).toContain("environment_id=env_1");
-		});
-	});
-
-	// ── Action verbs ──
-
-	describe("optimize", () => {
-		it("sends POST /actions/optimize with org_id", async () => {
-			const fetchMock = mockFetch({ changes: [] });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.optimize({ org_id: "org_1", period: "1mo", apply: true });
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/actions/optimize");
-			expect(JSON.parse(opts.body)).toEqual({
-				org_id: "org_1",
-				period: "1mo",
-				apply: true,
-			});
-		});
-	});
-
-	describe("scoreTrust", () => {
-		it("sends POST /actions/score with the agent id", async () => {
-			const fetchMock = mockFetch({ score: 720 });
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await api.scoreTrust("agent_1");
-
-			const [url, opts] = fetchMock.mock.calls[0];
-			expect(url).toBe("https://api.kredit.sh/actions/score");
-			expect(JSON.parse(opts.body)).toEqual({ agent_id: "agent_1" });
-		});
-	});
-
-	describe("error handling", () => {
-		it("throws on non-ok response", async () => {
-			const fetchMock = mockFetch({ error: "unauthorized" }, 401);
-			vi.stubGlobal("fetch", fetchMock);
-
-			const api = new KreditAPI(config);
-			await expect(
-				api.check({
-					agent_id: "a",
-					action: "x",
-					estimated_cost: 0,
+			vi.stubGlobal(
+				"fetch",
+				vi.fn().mockResolvedValue({
+					ok: false,
+					status: 502,
+					statusText: "Bad Gateway",
+					text: () => Promise.resolve("upstream down"),
+					json: () => Promise.reject(new Error("no json")),
 				}),
-			).rejects.toThrow("401");
+			);
+			const api = new KreditAPI(config);
+			const err = await api.listOrgs().catch((e) => e);
+			expect(err.status).toBe(502);
+			expect(err.detail).toBe("upstream down");
+		});
+	});
+
+	describe("check", () => {
+		it("posts the text intent to /check and marks the source mcp", async () => {
+			const r = await sent(
+				(api) =>
+					api.check({
+						agent_id: "a1",
+						intent: "Buy the Pegasus 42 from nike.com for $131.97",
+						environment: "sandbox",
+					}),
+				{ outcome: "review", score: 85 },
+			);
+			expect(r.url).toBe("https://api.kredit.sh/check");
+			expect(r.method).toBe("POST");
+			expect(r.body).toEqual({
+				agent_id: "a1",
+				intent: "Buy the Pegasus 42 from nike.com for $131.97",
+				environment: "sandbox",
+				source: "mcp",
+			});
+			expect(r.result).toEqual({ outcome: "review", score: 85 });
+		});
+	});
+
+	describe("organizations and rules", () => {
+		it("reads, updates, deletes and summarizes an organization", async () => {
+			expect((await sent((a) => a.getOrg("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1",
+			);
+			const upd = await sent((a) =>
+				a.updateOrg("o1", { settings: { place_orders: true } }),
+			);
+			expect(upd.method).toBe("PUT");
+			expect(upd.body).toEqual({ settings: { place_orders: true } });
+			const del = await sent((a) => a.deleteOrg("o1"));
+			expect(del.method).toBe("DELETE");
+			expect(del.url).toBe("https://api.kredit.sh/orgs/o1");
+			expect((await sent((a) => a.orgSummary("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/summary",
+			);
+			expect((await sent((a) => a.seed())).url).toBe(
+				"https://api.kredit.sh/seed",
+			);
 		});
 
-		it("surfaces the status and body of a 404", async () => {
-			const fetchMock = mockFetch({ detail: "Organization not found" }, 404);
-			vi.stubGlobal("fetch", fetchMock);
+		it("manages organization rules under /orgs/{id}/rules", async () => {
+			const add = await sent((a) =>
+				a.addRule("o1", {
+					name: "Daily budget",
+					spend: { amount: 500, window: "day" },
+					on_hit: "deny",
+				}),
+			);
+			expect(add.url).toBe("https://api.kredit.sh/orgs/o1/rules");
+			expect(add.method).toBe("POST");
+			expect(add.body.spend).toEqual({ amount: 500, window: "day" });
+			const upd = await sent((a) =>
+				a.updateRule("o1", "r1", { on_hit: "review" }),
+			);
+			expect(upd.url).toBe("https://api.kredit.sh/orgs/o1/rules/r1");
+			expect(upd.method).toBe("PUT");
+			const del = await sent((a) => a.deleteRule("o1", "r1"));
+			expect(del.method).toBe("DELETE");
+			expect((await sent((a) => a.listRules("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/rules",
+			);
+		});
+	});
 
-			const api = new KreditAPI(config);
-			await expect(api.getOrg("org_missing")).rejects.toThrow(/404/);
+	describe("agents", () => {
+		it("creates an agent under its organization with policy", async () => {
+			const r = await sent((a) =>
+				a.createAgent("o1", {
+					name: "Shopping agent",
+					prompt: "Buy running shoes",
+					guardrails: { allowed_merchants: ["nike.com"] },
+				}),
+			);
+			expect(r.url).toBe("https://api.kredit.sh/orgs/o1/agents");
+			expect(r.body.guardrails.allowed_merchants).toEqual(["nike.com"]);
+		});
+
+		it("updates, freezes, deletes and reads decisions", async () => {
+			const frz = await sent((a) => a.updateAgent("a1", { status: "frozen" }));
+			expect(frz.url).toBe("https://api.kredit.sh/agents/a1");
+			expect(frz.method).toBe("PUT");
+			expect(frz.body).toEqual({ status: "frozen" });
+			expect((await sent((a) => a.deleteAgent("a1"))).method).toBe("DELETE");
+			const dec = await sent((a) => a.agentDecisions("a1", 10, "2026-01-01"));
+			expect(dec.url).toBe(
+				"https://api.kredit.sh/agents/a1/decisions?limit=10&before=2026-01-01",
+			);
+		});
+
+		it("proposes, approves, rejects, promotes and verifies", async () => {
+			const prop = await sent((a) =>
+				a.proposeVersion("a1", { prompt: "new brief", note: "tighter" }),
+			);
+			expect(prop.url).toBe("https://api.kredit.sh/agents/a1/versions");
+			const appr = await sent((a) => a.approveVersion("a1", "ver_2", "sandbox"));
+			expect(appr.url).toBe(
+				"https://api.kredit.sh/agents/a1/versions/ver_2/approve",
+			);
+			expect(appr.body).toEqual({ environment: "sandbox" });
+			const rej = await sent((a) => a.rejectVersion("a1", "ver_2", "no"));
+			expect(rej.url).toBe(
+				"https://api.kredit.sh/agents/a1/versions/ver_2/reject",
+			);
+			expect(rej.body).toEqual({ note: "no" });
+			const prom = await sent((a) => a.promoteAgent("a1"));
+			expect(prom.url).toBe("https://api.kredit.sh/agents/a1/promote");
+			expect(prom.body).toEqual({ environment: "production" });
+			const ver = await sent((a) => a.verifyAgent("a1", "kredit"));
+			expect(ver.url).toBe("https://api.kredit.sh/agents/a1/verify-identity");
+			expect(ver.body).toEqual({ provider: "kredit" });
+		});
+	});
+
+	describe("agent tokens", () => {
+		it("issues, lists and revokes", async () => {
+			const iss = await sent((a) => a.issueAgentToken("a1", 30), {
+				token: "kat_x",
+			});
+			expect(iss.url).toBe("https://api.kredit.sh/agents/a1/tokens");
+			expect(iss.body).toEqual({ ttl_minutes: 30 });
+			const noTtl = await sent((a) => a.issueAgentToken("a1"));
+			expect(noTtl.body).toEqual({});
+			expect((await sent((a) => a.listAgentTokens("a1"))).method).toBe("GET");
+			const rev = await sent((a) => a.revokeAgentToken("a1", "t1"));
+			expect(rev.url).toBe("https://api.kredit.sh/agents/a1/tokens/t1");
+			expect(rev.method).toBe("DELETE");
+		});
+	});
+
+	describe("decisions, reviews, approvals", () => {
+		it("lists decisions with filters in the query string", async () => {
+			const r = await sent((a) =>
+				a.listDecisions("o1", { outcome: "deny", limit: 5 }),
+			);
+			expect(r.url).toBe(
+				"https://api.kredit.sh/orgs/o1/decisions?outcome=deny&limit=5",
+			);
+		});
+		it("reads one, the review queue, and executes", async () => {
+			expect((await sent((a) => a.getDecision("d1"))).url).toBe(
+				"https://api.kredit.sh/decisions/d1",
+			);
+			expect((await sent((a) => a.listReviews("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/reviews",
+			);
+			const ex = await sent((a) => a.executeDecision("d1"));
+			expect(ex.url).toBe("https://api.kredit.sh/decisions/d1/execute");
+			expect(ex.method).toBe("POST");
+		});
+		it("lists pending approvals by default", async () => {
+			expect((await sent((a) => a.listApprovals("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/approvals",
+			);
+			expect((await sent((a) => a.listApprovals("o1", "approved"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/approvals?status=approved",
+			);
+		});
+	});
+
+	describe("documents and integrations", () => {
+		it("adds, searches and deletes documents", async () => {
+			const add = await sent((a) =>
+				a.addDocument("o1", {
+					name: "Sanctions",
+					kind: "text",
+					content: "Acme Corp",
+					tags: ["sanctions"],
+				}),
+			);
+			expect(add.url).toBe("https://api.kredit.sh/orgs/o1/documents");
+			expect(add.body.tags).toEqual(["sanctions"]);
+			const s = await sent((a) => a.searchDocuments("o1", "acme corp"));
+			expect(s.url).toBe(
+				"https://api.kredit.sh/orgs/o1/documents/search?q=acme+corp",
+			);
+			expect((await sent((a) => a.deleteDocument("doc1"))).url).toBe(
+				"https://api.kredit.sh/documents/doc1",
+			);
+		});
+		it("updates and tests an integration by provider", async () => {
+			const upd = await sent((a) =>
+				a.updateIntegration("o1", "vgs", {
+					keys: { vault_id: "tnt", username: "u", password: "p" },
+					mode: "sandbox",
+				}),
+			);
+			expect(upd.url).toBe("https://api.kredit.sh/orgs/o1/integrations/vgs");
+			expect(upd.method).toBe("PUT");
+			expect(upd.body.keys.vault_id).toBe("tnt");
+			const t = await sent((a) => a.testIntegration("o1", "vgs"));
+			expect(t.url).toBe("https://api.kredit.sh/orgs/o1/integrations/vgs/test");
+			expect(t.method).toBe("POST");
+		});
+	});
+
+	describe("audit, orders, environments, simulations", () => {
+		it("builds the query strings", async () => {
+			expect(
+				(await sent((a) => a.audit("o1", 20, undefined, "decision.deny"))).url,
+			).toBe(
+				"https://api.kredit.sh/orgs/o1/audit?limit=20&action=decision.deny",
+			);
+			expect((await sent((a) => a.listOrders("o1", 3))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/orders?limit=3",
+			);
+			expect((await sent((a) => a.listEnvironments("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/environments",
+			);
+			const env = await sent((a) => a.createEnvironment("o1", "staging"));
+			expect(env.body).toEqual({ name: "staging" });
+			expect((await sent((a) => a.deleteEnvironment("e1"))).url).toBe(
+				"https://api.kredit.sh/environments/e1",
+			);
+		});
+		it("runs, lists, reads and stops simulations", async () => {
+			const run = await sent((a) =>
+				a.runSimulation("o1", { count: 10, scenario: "fraud" }),
+			);
+			expect(run.url).toBe("https://api.kredit.sh/orgs/o1/simulations/run");
+			expect(run.body).toEqual({ count: 10, scenario: "fraud" });
+			expect((await sent((a) => a.listSimulations("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/simulations",
+			);
+			expect((await sent((a) => a.getSimulation("s1"))).url).toBe(
+				"https://api.kredit.sh/simulations/s1",
+			);
+			expect((await sent((a) => a.stopSimulation("s1"))).url).toBe(
+				"https://api.kredit.sh/simulations/s1/stop",
+			);
+		});
+	});
+
+	describe("agentic commerce", () => {
+		it("lists and updates workflows", async () => {
+			expect((await sent((a) => a.listWorkflows("o1"))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/commerce/workflows",
+			);
+			const upd = await sent((a) =>
+				a.updateWorkflow("w1", { query: "running shoes under $150" }),
+			);
+			expect(upd.url).toBe("https://api.kredit.sh/commerce/workflows/w1");
+			expect(upd.method).toBe("PUT");
+		});
+		it("starts a run, reuses a search, chooses, rechooses, stops", async () => {
+			const start = await sent((a) =>
+				a.startRun("o1", {
+					workflow_id: "w1",
+					choice_mode: "you",
+					from_run_id: "r0",
+				}),
+			);
+			expect(start.url).toBe("https://api.kredit.sh/orgs/o1/commerce/runs");
+			expect(start.body.from_run_id).toBe("r0");
+			expect((await sent((a) => a.listRuns("o1", 5))).url).toBe(
+				"https://api.kredit.sh/orgs/o1/commerce/runs?limit=5",
+			);
+			expect((await sent((a) => a.getRun("r1"))).url).toBe(
+				"https://api.kredit.sh/commerce/runs/r1",
+			);
+			const choose = await sent((a) => a.chooseOption("r1", null));
+			expect(choose.url).toBe("https://api.kredit.sh/commerce/runs/r1/choose");
+			expect(choose.body).toEqual({ find_id: null });
+			const re = await sent((a) => a.rechooseOption("r1", "f2"));
+			expect(re.url).toBe("https://api.kredit.sh/commerce/runs/r1/rechoose");
+			expect(re.body).toEqual({ find_id: "f2" });
+			expect((await sent((a) => a.stopRun("r1"))).url).toBe(
+				"https://api.kredit.sh/commerce/runs/r1/stop",
+			);
 		});
 	});
 });

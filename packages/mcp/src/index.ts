@@ -3,19 +3,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { KreditAPI } from "./api.js";
+import { type Json, KreditAPI } from "./api.js";
 import { resolveConfig } from "./config.js";
+
+type Args = Record<string, unknown>;
+type Shape = Record<string, z.ZodTypeAny>;
 
 function tool(
 	server: McpServer,
 	name: string,
 	desc: string,
-	schema: Record<string, any>,
-	fn: (args: Record<string, any>) => Promise<any>,
+	schema: Shape,
+	fn: (args: Args) => Promise<unknown>,
 ) {
 	server.tool(name, desc, schema, async (args) => {
 		try {
-			const result = await fn(args);
+			const result = await fn(args as Args);
 			return {
 				content: [
 					{ type: "text" as const, text: JSON.stringify(result, null, 2) },
@@ -35,23 +38,11 @@ function tool(
 	});
 }
 
-// Mode is a property of an ENVIRONMENT, never of an organization.
-const MODE_DESC =
-	"Environment mode to scope to: sandbox (fully simulated) | preview (real API calls, no settlement) | production (live)";
-const modeField = () =>
-	z.enum(["sandbox", "preview", "production"]).optional().describe(MODE_DESC);
-
-const ENVIRONMENT_ID_DESC =
-	"Environment id to scope to (canonical scope; takes precedence over mode when both are set)";
-const environmentIdField = () =>
-	z.string().optional().describe(ENVIRONMENT_ID_DESC);
-
-// Every org-scoped call may omit org_id — the server uses the activated org.
-const ORG_ID_DESC =
-	"Organization id. Omit to use the ACTIVATED organization (see kredit_activate_org).";
-const orgIdField = () => z.string().optional().describe(ORG_ID_DESC);
+const str = (v: unknown) => v as string;
+const num = (v: unknown) => v as number | undefined;
 
 const WINDOW = [
+	"txn",
 	"sec",
 	"min",
 	"hr",
@@ -62,1206 +53,742 @@ const WINDOW = [
 	"year",
 ] as const;
 
-const SERVER_INSTRUCTIONS = `Kredit is the risk intelligence layer for AI agents that spend money.
+const SERVER_INSTRUCTIONS = `Kredit is the identity and risk layer for AI agents that spend money.
 
-Two tool families:
-- kredit_* tools operate on the org/environment/rule surface.
-- kredit_platform_* tools operate on the organization-first platform, the
-  API root. Call kredit_platform_check BEFORE any payment, API call, or tool
-  call that spends money; it returns allow | deny | review with nine risk layers.
+Call kredit_check BEFORE any payment, purchase, transfer, or paid API call.
+Describe the intent in words ("buy running shoes from nike.com for $129");
+the server reads the action, amount, merchant and rail from the text. The
+answer is allow, deny or review, with a score, a reason, and nine risk layers.
 
-Changes made through MCP (kredit_platform_create_agent,
-kredit_platform_propose_version) are created as PENDING versions. A human must
-approve them on the platform with a passkey before the agent can act.`;
+An organization owns its agents, rules, integrations and commerce workflows.
+Over an API key, deleting an organization or an agent and changing policy
+(rules, org settings, a new agent version) do not apply at once: they wait
+as a pending approval that a person approves on the console with a passkey.
+The active policy stays in force until then. Reviews of decisions and of
+commerce runs are decided by a person on the console, never from here.`;
 
-// ── Platform shared schemas ──
-const PLATFORM_PENDING_NOTE =
-	"Creates the agent as a PENDING version; a human must approve it on the platform with a passkey before it can act.";
+const PENDING =
+	"Over an API key this waits as a pending approval that a person approves on the console (Review tab); the active policy stays in force meanwhile.";
 
-const platformToolSchema = z.object({
+// ── shared schemas ──
+const toolSchema = z.object({
 	name: z.string().describe("Tool name, e.g. 'store_checkout'"),
-	kind: z
-		.enum(["mcp", "api", "integration", "builtin"])
-		.describe("Where the tool runs"),
+	kind: z.enum(["mcp", "api", "integration", "builtin"]).optional(),
 	provider: z
 		.string()
 		.optional()
-		.describe("Provider key for integration tools, e.g. 'skyfire'"),
+		.describe("Provider key for integration tools, e.g. 'vgs'"),
 	scopes: z
 		.array(z.string())
+		.optional()
 		.describe("Scopes the tool grants, e.g. ['payment.card']"),
-	description: z.string().describe("What the tool does"),
+	description: z.string().optional(),
 });
 
-const platformRuleSchema = z.object({
-	name: z.string().describe("Rule name, e.g. 'Payment cap'"),
+const spendSchema = z
+	.object({
+		amount: z.number().min(0).describe("Dollars. 0 means no cap."),
+		window: z
+			.enum(WINDOW)
+			.describe("Rolling window. 'txn' caps a single transaction."),
+	})
+	.describe("Spend cap over a window");
+
+const hitRateSchema = z
+	.object({
+		count: z.number().int().min(0).describe("Max hits. 0 means no cap."),
+		window: z.enum(WINDOW),
+	})
+	.describe("Call-count cap over a window");
+
+const ruleFields = {
+	name: z.string().optional().describe("Rule name, e.g. 'Daily budget'"),
 	type: z
 		.enum(["payment", "api", "tool"])
-		.describe("The action kind this rule governs"),
+		.optional()
+		.describe("The action kind this rule governs (default payment)"),
 	providers: z
 		.array(z.string())
 		.optional()
-		.describe("Providers covered, e.g. ['stripe','visa']. Empty = all."),
-	spend: z
-		.object({
-			amount: z.number().describe("Cap in dollars (0 = no cap)"),
-			window: z.enum(WINDOW),
-		})
-		.nullable()
-		.optional()
-		.describe("Spend cap over a rolling window"),
-	hit_rate: z
-		.object({
-			count: z.number().int().describe("Max calls (0 = no cap)"),
-			window: z.enum(WINDOW),
-		})
-		.nullable()
-		.optional()
-		.describe("Call-count cap over a rolling window"),
+		.describe("Rails or providers covered, e.g. ['card']. Empty means all."),
+	spend: spendSchema.nullable().optional(),
+	hit_rate: hitRateSchema.nullable().optional(),
 	allowed: z
 		.array(z.string())
 		.optional()
-		.describe("If non-empty, ONLY these actions/providers are permitted"),
+		.describe(
+			"If non-empty, only these merchants, domains or actions pass; everything else is a hit",
+		),
 	blocked: z
 		.array(z.string())
 		.optional()
-		.describe("These actions/providers are always denied"),
+		.describe("These merchants, domains or actions are always a hit"),
 	enabled: z.boolean().optional().describe("Default true"),
 	on_hit: z
 		.enum(["deny", "review"])
 		.optional()
-		.describe("Outcome when the rule hits (default deny)"),
-});
-
-const platformGuardrailsSchema = z.object({
-	max_per_action: z.number().optional().describe("Dollars"),
-	daily_budget: z.number().optional().describe("Dollars"),
-	monthly_budget: z.number().optional().describe("Dollars"),
-	require_review_above: z.number().optional().describe("Dollars"),
-	allowed_merchants: z.array(z.string()).optional(),
-	blocked_merchants: z.array(z.string()).optional(),
-	allowed_categories: z.array(z.string()).optional(),
-});
-
-/** An intent in words, plus whatever structure the caller states outright.
- * The platform reads action, amount, merchant and rail from the words. */
-const platformIntentFields = {
-	intent: z
-		.string()
-		.min(2)
-		.describe(
-			"What the agent wants to do, in words, e.g. 'buy running shoes from nike.com for $139 by card'",
-		),
-	action: z
-		.string()
-		.optional()
-		.describe("Action name, e.g. 'payment.card', 'payment.usdc', 'api.call'; read from the intent when omitted"),
-	amount: z.number().optional().describe("Amount in dollars; read from the intent when omitted"),
-	currency: z.string().optional().describe("Default USD"),
-	merchant: z
-		.object({
-			name: z.string(),
-			domain: z.string().optional(),
-			category: z.string().optional(),
-		})
-		.optional(),
-	counterparty: z.string().optional(),
-	payment_rail: z
-		.enum(["card", "usdc", "skyfire", "kite", "ach", "wire", "crypto"])
-		.optional(),
-	metadata: z.record(z.string(), z.unknown()).optional(),
+		.describe("What a hit does: deny, or ask a person (default deny)"),
 };
+const ruleSchema = z.object(ruleFields);
 
-const platformSessionField = () =>
-	z
-		.record(z.string(), z.unknown())
-		.optional()
-		.describe(
-			"Session telemetry for the fraud layer: {device_id?, ip?, user_agent?, fingerprint?, telemetry?}",
-		);
+const guardrailsSchema = z
+	.object({
+		max_per_action: z
+			.number()
+			.optional()
+			.describe("Dollars: a single action above this is a hit"),
+		require_review_above: z
+			.number()
+			.optional()
+			.describe("Dollars: above this a person decides"),
+		allowed_merchants: z
+			.array(z.string())
+			.optional()
+			.describe(
+				"Vendor allow list by domain, e.g. ['nike.com']. Vendors not on the list are denied.",
+			),
+		blocked_merchants: z.array(z.string()).optional(),
+	})
+	.describe("Per-action ceilings and vendor lists");
 
-const platformEnvField = () =>
-	z
-		.enum(["sandbox", "production"])
-		.optional()
-		.describe("Platform environment (default sandbox)");
+const merchantSchema = z.object({
+	name: z.string(),
+	domain: z.string().optional(),
+	category: z.string().optional(),
+});
+
+const addressSchema = z.object({
+	line1: z.string(),
+	city: z.string(),
+	region: z.string(),
+	postal_code: z.string(),
+	country: z.string().optional().describe("Default US"),
+});
+
+const kybSchema = z
+	.object({
+		status: z.enum(["verified", "pending", "unverified"]).optional(),
+		provider: z.enum(["kredit", "middesk", "skyfire", "kite"]).optional(),
+		legal_name: z.string().optional(),
+		ein: z.string().optional(),
+		address: addressSchema.optional(),
+		phone: z.string().optional(),
+		email: z.string().optional(),
+	})
+	.describe("Know your business: the legal entity behind the organization");
+
+const orgSettingsSchema = z
+	.object({
+		score_floor: z
+			.number()
+			.int()
+			.min(0)
+			.max(100)
+			.optional()
+			.describe("Deny below this score"),
+		review_floor: z
+			.number()
+			.int()
+			.min(0)
+			.max(100)
+			.optional()
+			.describe("A person decides below this score"),
+		human_guard: z.boolean().optional(),
+		email_denials: z.boolean().optional(),
+		simulated_in_production: z.boolean().optional(),
+		place_orders: z
+			.boolean()
+			.optional()
+			.describe("Whether a commerce run presses the order button"),
+	})
+	.describe("Defaults applied to every decision in the organization");
 
 function createServer(api: KreditAPI): McpServer {
 	const server = new McpServer(
-		{ name: "kredit", version: "0.7.0" },
+		{ name: "kredit", version: "0.8.0" },
 		{ instructions: SERVER_INSTRUCTIONS },
 	);
 
-	// ── Organizations (the top-level tenant) ──
+	// ── session ──
+	tool(
+		server,
+		"kredit_whoami",
+		"Who this key acts as: the user, whether the session is passkey-verified, and how many passkeys are registered.",
+		{},
+		() => api.session(),
+	);
+
+	// ── organizations ──
 	tool(
 		server,
 		"kredit_list_orgs",
-		"List your organizations. An organization is the top-level tenant: it owns agents, environments, workflows and guardrail rules. The activated one (what every other call defaults to) has active: true.",
+		"List the organizations this key can see. An organization owns its agents, rules, integrations and workflows.",
 		{},
 		() => api.listOrgs(),
 	);
 	tool(
 		server,
-		"kredit_create_org",
-		"Create an organization. Its three standard environments (sandbox, preview, production) are provisioned automatically. A user's first organization becomes the activated one.",
-		{
-			name: z.string().describe("Organization name (unique per account)"),
-			config: z
-				.record(z.string(), z.any())
-				.optional()
-				.describe("Optional org config: integrations, execution, tool gates"),
-		},
-		({ name, config }) => api.createOrg(name, config),
-	);
-	tool(
-		server,
 		"kredit_get_org",
-		"Get an organization: config, version, activation state, and its live environment",
-		{ org_id: orgIdField() },
-		async ({ org_id }) => api.getOrg(org_id ?? (await activeOrgId(api))),
+		"One organization: name, KYB, KYC, settings, rules and its active version.",
+		{ org_id: z.string() },
+		({ org_id }) => api.getOrg(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_activate_org",
-		"Activate an organization — point this API key, the kredit agent and the CLI at it. Every org-scoped call that omits org_id then targets this organization.",
-		{ org_id: z.string() },
-		({ org_id }) => api.activateOrg(org_id),
+		"kredit_create_org",
+		"Create an organization.",
+		{
+			name: z.string().min(1).max(120),
+			description: z.string().optional(),
+		},
+		({ name, description }) =>
+			api.createOrg({ name, ...(description ? { description } : {}) }),
 	);
 	tool(
 		server,
 		"kredit_update_org",
-		"Update an organization's name or config (integrations, per-mode execution settings, tool allow/block lists)",
+		`Update an organization's name, description, KYB record or settings. ${PENDING}`,
 		{
-			org_id: orgIdField(),
-			name: z.string().optional(),
-			config: z.record(z.string(), z.any()).optional(),
+			org_id: z.string(),
+			name: z.string().min(1).max(120).optional(),
+			description: z.string().optional(),
+			kyb: kybSchema.optional(),
+			settings: orgSettingsSchema.optional(),
 		},
-		async ({ org_id, ...data }) =>
-			api.updateOrg(org_id ?? (await activeOrgId(api)), data),
+		({ org_id, ...data }) => api.updateOrg(str(org_id), data),
 	);
 	tool(
 		server,
 		"kredit_delete_org",
-		"Delete an organization and EVERYTHING under it: agents, environments, rules, simulations, workflows and transactions",
+		`Delete an organization and everything under it. ${PENDING}`,
 		{ org_id: z.string() },
-		({ org_id }) => api.deleteOrg(org_id),
+		({ org_id }) => api.deleteOrg(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_reset_org",
-		"Reset the fleet's mutable state: kredit scores back to 700, counters zeroed, every agent active. Rules, agents and the transaction log are untouched.",
-		{ org_id: orgIdField() },
-		async ({ org_id }) => api.resetOrg(org_id ?? (await activeOrgId(api))),
+		"kredit_org_summary",
+		"Counts and recent activity for an organization: agents, decisions by outcome, pending reviews and approvals.",
+		{ org_id: z.string() },
+		({ org_id }) => api.orgSummary(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_org_activity",
-		"List live runs (simulations, workflow runs) across an organization's environments",
-		{ org_id: orgIdField() },
-		async ({ org_id }) => api.orgActivity(org_id ?? (await activeOrgId(api))),
-	);
-	tool(
-		server,
-		"kredit_org_versions",
-		"List an organization's saved state versions (one per rule/agent/config change)",
-		{ org_id: orgIdField() },
-		async ({ org_id }) => api.orgVersions(org_id ?? (await activeOrgId(api))),
-	);
-	tool(
-		server,
-		"kredit_restore_org_version",
-		"Roll an organization back to a saved version (config + agents + rules). Reversible — the current state is snapshotted first.",
-		{ org_id: orgIdField(), version: z.number().int() },
-		async ({ org_id, version }) =>
-			api.restoreOrgVersion(org_id ?? (await activeOrgId(api)), version),
+		"kredit_seed_demo",
+		"Create the demo organization with its agents, documents and commerce workflows. Idempotent.",
+		{},
+		() => api.seed(),
 	);
 
-	// ── Pilot ──
-	tool(
-		server,
-		"kredit_pilot",
-		"Stand up a demo fleet and run a live pilot simulation. With no org_id it creates a brand-new organization (one call: org + agents + guardrails + streaming run); with org_id it seeds the fleet into that organization's environment. Returns the run's environment_id — open it in the platform to watch the audit fill in.",
-		{
-			org_id: z
-				.string()
-				.optional()
-				.describe("Seed into this org. Omit to create a fresh organization."),
-			environment_id: z
-				.string()
-				.optional()
-				.describe("Environment to seed into (defaults to the sandbox env)"),
-			agent_count: z.number().int().min(1).max(50).optional(),
-			integrations: z
-				.array(z.string())
-				.optional()
-				.describe("Providers the fleet may use, e.g. ['stripe','openai']"),
-			name: z
-				.string()
-				.optional()
-				.describe(
-					"Name for the new organization (only when org_id is omitted)",
-				),
-		},
-		({ org_id, environment_id, agent_count, integrations, name }) =>
-			org_id
-				? api.runPilot(org_id, {
-						...(agent_count !== undefined ? { agent_count } : {}),
-						...(integrations ? { integrations } : {}),
-						...(environment_id ? { environment_id } : {}),
-					})
-				: api.pilotBootstrap({
-						...(agent_count !== undefined ? { agent_count } : {}),
-						...(integrations ? { integrations } : {}),
-						...(name ? { name } : {}),
-					}),
-	);
-
-	// ── Guardrail rules (the only monetary gate) ──
+	// ── rules ──
 	tool(
 		server,
 		"kredit_list_rules",
-		"List an organization's guardrail rules. Each rule carries its scope: environment_id (blank = applies org-wide) and agent_id (blank = applies to the whole fleet).",
-		{ org_id: orgIdField() },
-		async ({ org_id }) => api.listOrgRules(org_id ?? (await activeOrgId(api))),
+		"The organization's rules: vendor allow and block lists, spend caps per window, hit-rate caps, each with deny or review on a hit.",
+		{ org_id: z.string() },
+		({ org_id }) => api.listRules(str(org_id)),
 	);
 	tool(
 		server,
 		"kredit_add_rule",
-		"Add a guardrail rule — the ONLY monetary gate. A rule governs actions of `type` on `providers` (empty = all providers) and enforces, in order: blocked list, allow list, spend-per-window cap, hit-rate-per-window cap. Scope it to one agent with agent_id, and to one environment with environment_id (omit for org-wide). An agent's budget is derived from its tightest applicable spend rule.",
-		{
-			org_id: orgIdField(),
-			name: z.string().describe("Rule name, e.g. 'Payment cap'"),
-			type: z
-				.enum(["payment", "api", "tool"])
-				.describe("The action kind this rule governs"),
-			providers: z
-				.array(z.string())
-				.optional()
-				.describe("Providers covered, e.g. ['stripe','visa']. Empty = all."),
-			spend: z
-				.object({
-					amount: z.number().describe("Cap in dollars (0 = no cap)"),
-					window: z.enum(WINDOW),
-				})
-				.optional()
-				.describe("Spend cap over a rolling window"),
-			hit_rate: z
-				.object({
-					count: z.number().int().describe("Max calls (0 = no cap)"),
-					window: z.enum(WINDOW),
-				})
-				.optional()
-				.describe("Call-count cap over a rolling window"),
-			allowed: z
-				.array(z.string())
-				.optional()
-				.describe("If non-empty, ONLY these actions/providers are permitted"),
-			blocked: z
-				.array(z.string())
-				.optional()
-				.describe("These actions/providers are always denied"),
-			agent_id: z
-				.string()
-				.optional()
-				.describe("Scope to one agent. Omit to apply to the whole fleet."),
-			environment_id: environmentIdField(),
-			mode: modeField(),
-		},
-		async ({ org_id, ...rule }) =>
-			api.addOrgRule(org_id ?? (await activeOrgId(api)), rule),
+		`Add an organization rule. Example: a $500 per day spend cap is {name:'Daily budget', spend:{amount:500, window:'day'}}. ${PENDING}`,
+		{ org_id: z.string(), ...ruleFields },
+		({ org_id, ...data }) => api.addRule(str(org_id), data),
 	);
 	tool(
 		server,
 		"kredit_update_rule",
-		"Update a guardrail rule's caps, providers, lists, or enabled flag",
-		{
-			org_id: orgIdField(),
-			rule_id: z.string(),
-			name: z.string().optional(),
-			type: z.enum(["payment", "api", "tool"]).optional(),
-			providers: z.array(z.string()).optional(),
-			spend: z
-				.object({ amount: z.number(), window: z.enum(WINDOW) })
-				.optional(),
-			hit_rate: z
-				.object({ count: z.number().int(), window: z.enum(WINDOW) })
-				.optional(),
-			allowed: z.array(z.string()).optional(),
-			blocked: z.array(z.string()).optional(),
-			enabled: z.boolean().optional(),
-		},
-		async ({ org_id, rule_id, ...data }) =>
-			api.updateOrgRule(org_id ?? (await activeOrgId(api)), rule_id, data),
+		`Change part of an organization rule; fields left out keep their value. ${PENDING}`,
+		{ org_id: z.string(), rule_id: z.string(), ...ruleFields },
+		({ org_id, rule_id, ...data }) =>
+			api.updateRule(str(org_id), str(rule_id), data),
 	);
 	tool(
 		server,
 		"kredit_delete_rule",
-		"Delete a guardrail rule from an organization",
-		{ org_id: orgIdField(), rule_id: z.string() },
-		async ({ org_id, rule_id }) =>
-			api.deleteOrgRule(org_id ?? (await activeOrgId(api)), rule_id),
+		`Remove an organization rule. ${PENDING}`,
+		{ org_id: z.string(), rule_id: z.string() },
+		({ org_id, rule_id }) => api.deleteRule(str(org_id), str(rule_id)),
 	);
 
-	// ── Agents ──
+	// ── agents ──
 	tool(
 		server,
 		"kredit_list_agents",
-		"List agents. Agents belong directly to the organization; their mutable state (score, status, counters) is per environment, so scope with environment_id or mode to see one environment's fleet.",
-		{
-			org_id: orgIdField(),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-			status: z.enum(["active", "throttled", "frozen"]).optional(),
-		},
-		({ org_id, mode, environment_id, status }) =>
-			api.listAgents(org_id, mode, environment_id, status),
-	);
-	tool(
-		server,
-		"kredit_create_agent",
-		"Create an agent in an organization. `budget` is a convenience that materializes an agent-scoped spend RULE (budgets are always rules, never stored state). New agents are drafts: they may act only in sandbox environments until published.",
-		{
-			name: z.string().describe("Agent name (unique per organization)"),
-			org_id: orgIdField(),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-			priority: z.enum(["critical", "high", "normal", "low"]).optional(),
-			budget: z
-				.number()
-				.optional()
-				.describe(
-					"Spend cap in dollars — materialized as an agent-scoped rule",
-				),
-			budget_window: z
-				.enum(WINDOW)
-				.optional()
-				.describe("Window for the budget rule (default: mo)"),
-			backdate_days: z
-				.number()
-				.int()
-				.optional()
-				.describe("Make the agent appear older (tenure bonus in simulations)"),
-		},
-		(args) => api.createAgent(args),
+		"The organization's agents with status, KYA, stats and active version.",
+		{ org_id: z.string() },
+		({ org_id }) => api.listAgents(str(org_id)),
 	);
 	tool(
 		server,
 		"kredit_get_agent",
-		"Get an agent: identity, priority, kredit score, status, and rules",
+		"One agent: prompt, tools, rules, guardrails, versions, identity and stats. An agent token may read its own agent.",
 		{ agent_id: z.string() },
-		({ agent_id }) => api.getAgent(agent_id),
+		({ agent_id }) => api.getAgent(str(agent_id)),
+	);
+	tool(
+		server,
+		"kredit_create_agent",
+		`Create an agent with its brief (prompt), tools, rules and guardrails. Its first version is pending until a person approves it on the console. ${PENDING}`,
+		{
+			org_id: z.string(),
+			name: z.string().min(1).max(120),
+			description: z.string().optional(),
+			prompt: z.string().describe("What the agent is for: its brief"),
+			tools: z.array(toolSchema).optional(),
+			rules: z.array(ruleSchema).optional(),
+			guardrails: guardrailsSchema.optional(),
+		},
+		({ org_id, ...data }) => api.createAgent(str(org_id), data),
 	);
 	tool(
 		server,
 		"kredit_update_agent",
-		"Update an agent's name, priority, or status. Status is per-environment — pass environment_id to target one environment's state row.",
+		"Rename an agent, change its description, or set status 'frozen' or 'active'. A frozen agent is denied everything. Unfreezing on the console always asks for a passkey.",
 		{
 			agent_id: z.string(),
 			name: z.string().optional(),
-			priority: z.enum(["critical", "high", "normal", "low"]).optional(),
-			status: z.enum(["active", "throttled", "frozen"]).optional(),
-			environment_id: environmentIdField(),
+			description: z.string().optional(),
+			status: z.enum(["active", "frozen"]).optional(),
 		},
-		({ agent_id, ...data }) => api.updateAgent(agent_id, data),
+		({ agent_id, ...data }) => api.updateAgent(str(agent_id), data),
 	);
 	tool(
 		server,
 		"kredit_delete_agent",
-		"Delete an agent identity and all of its per-environment state",
+		`Delete an agent. ${PENDING}`,
 		{ agent_id: z.string() },
-		({ agent_id }) => api.deleteAgent(agent_id),
+		({ agent_id }) => api.deleteAgent(str(agent_id)),
 	);
 	tool(
 		server,
-		"kredit_publish_agent",
-		"Publish a draft agent so it may act outside sandbox environments (preview and production)",
-		{ agent_id: z.string() },
-		({ agent_id }) => api.publishAgent(agent_id),
-	);
-
-	// ── Check & Report ──
-	tool(
-		server,
-		"kredit_check",
-		"Risk check before a paid action. Returns allow/block with reason, plus the agent's kredit score.",
-		{
-			agent_id: z.string(),
-			action: z
-				.string()
-				.describe("Action name, e.g. 'openai.chat', 'payment.stripe.charge'"),
-			estimated_cost: z.number().describe("Estimated cost in dollars"),
-			environment_id: environmentIdField(),
-			type: z
-				.enum(["api_call", "mcp_call", "compute", "data", "tool", "other"])
-				.optional()
-				.describe("Transaction type; MCP-originated calls default to mcp_call"),
-			metadata: z
-				.record(z.string(), z.unknown())
-				.optional()
-				.describe("Freeform metadata for the transaction"),
-		},
-		(args) => api.check({ type: "mcp_call", ...args }),
-	);
-	tool(
-		server,
-		"kredit_report",
-		"Report outcome after an action. Updates the agent's credit score.",
-		{
-			transaction_id: z.string(),
-			outcome: z.enum(["success", "failure", "partial"]),
-			actual_cost: z.number().optional().describe("Actual cost in dollars"),
-		},
-		(args) => api.report(args),
-	);
-
-	// ── Score & Spend ──
-	tool(
-		server,
-		"kredit_score",
-		"Get an agent's kredit score and stats",
-		{ agent_id: z.string() },
-		({ agent_id }) => api.getScore(agent_id),
-	);
-	tool(
-		server,
-		"kredit_spend",
-		"Get an agent's spend: totals by window, by category, over time, and recent transactions",
-		{ agent_id: z.string() },
-		({ agent_id }) => api.getSpend(agent_id),
-	);
-
-	// ── Fleet ──
-	tool(
-		server,
-		"kredit_fleet",
-		"Fleet overview: agent counts by status, total derived budget, average kredit score, windowed spend, and risk events blocked",
-		{
-			org_id: orgIdField(),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-		},
-		({ org_id, mode, environment_id }) =>
-			api.fleetOverview(org_id, mode, environment_id),
-	);
-
-	// ── Transactions & events ──
-	tool(
-		server,
-		"kredit_transactions",
-		"List transactions (the audit log), scoped by organization, environment, agent, or simulation run",
-		{
-			org_id: orgIdField(),
-			agent_id: z.string().optional(),
-			status: z.enum(["allowed", "blocked", "flagged"]).optional(),
-			risk_level: z.enum(["low", "medium", "high", "critical"]).optional(),
-			limit: z.number().int().optional(),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-			simulation_id: z
-				.string()
-				.optional()
-				.describe("Only transactions from this simulation run"),
-		},
-		(args) => api.listTransactions(args),
-	);
-	tool(
-		server,
-		"kredit_events",
-		"List an agent's state-change events (score, status, rules, publish)",
-		{
-			agent_id: z.string(),
-			event_type: z
-				.string()
-				.optional()
-				.describe(
-					"Filter: score_change, status_change, rule_added, rule_removed, agent_published",
-				),
-		},
-		({ agent_id, event_type }) => api.listEvents(agent_id, event_type),
-	);
-
-	// ── Environments ──
-	tool(
-		server,
-		"kredit_list_environments",
-		"List an organization's environments. The three modes (sandbox | preview | production) are the standard environments — exactly one production environment per org. Every simulation run is its own sandbox-mode environment nested inside its parent.",
-		{ org_id: orgIdField() },
-		async ({ org_id }) =>
-			api.listEnvironments(org_id ?? (await activeOrgId(api))),
-	);
-	tool(
-		server,
-		"kredit_create_environment",
-		"Create an environment in an organization with a mode: sandbox (fully simulated), preview (real API calls, no settlement), or production (live)",
-		{
-			org_id: orgIdField(),
-			mode: z
-				.enum(["sandbox", "preview", "production"])
-				.describe("Environment mode"),
-			name: z.string().optional().describe("Optional environment name"),
-		},
-		async ({ org_id, mode, name }) =>
-			api.createEnvironment({
-				org_id: org_id ?? (await activeOrgId(api)),
-				mode,
-				...(name ? { name } : {}),
-			}),
-	);
-	tool(
-		server,
-		"kredit_get_environment",
-		"Get an environment's full manifest: fleet, guardrail rules, priors, workflows, execution settings, recent audit, and live activity",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.environmentBundle(environment_id),
-	);
-	tool(
-		server,
-		"kredit_clone_environment",
-		"Clone an environment into a fresh sandbox-mode copy of its whole state (agents, rules, priors). Experiment on an exact copy — of production, even — without touching the live fleet, then run a simulation on the clone.",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.cloneEnvironment(environment_id),
-	);
-	tool(
-		server,
-		"kredit_promote_environment",
-		"Promote an environment's full state into a standard-mode environment (sandbox | preview | production), creating it on demand. The target is snapshotted first, so this is reversible.",
-		{
-			environment_id: z.string().describe("Source environment to promote"),
-			mode: z
-				.enum(["sandbox", "preview", "production"])
-				.describe("Target mode to promote into"),
-		},
-		({ environment_id, mode }) =>
-			api.promoteEnvironmentToMode(environment_id, mode),
-	);
-	tool(
-		server,
-		"kredit_go_live",
-		"Make an environment the organization's LIVE target — the environment API calls hit when they don't pass an environment_id",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.goLiveEnvironment(environment_id),
-	);
-	tool(
-		server,
-		"kredit_reset_environment",
-		"Wipe everything an environment owns (agents' state, rules, priors, runs, transactions) while keeping the environment itself",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.resetEnvironment(environment_id),
-	);
-	tool(
-		server,
-		"kredit_delete_environment",
-		"Delete a disposable environment (a simulation run's env or a clone) and all its data. Standard mode environments cannot be deleted — reset them instead.",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.deleteEnvironment(environment_id),
-	);
-	tool(
-		server,
-		"kredit_environment_versions",
-		"List an environment's saved state versions (newest first)",
-		{ environment_id: z.string() },
-		({ environment_id }) => api.environmentVersions(environment_id),
-	);
-	tool(
-		server,
-		"kredit_restore_environment",
-		"Roll an environment back to a saved state version. Reversible — the current state is snapshotted first.",
-		{ environment_id: z.string(), version: z.number().int() },
-		({ environment_id, version }) =>
-			api.restoreEnvironment(environment_id, version),
-	);
-
-	// ── Simulations ──
-	tool(
-		server,
-		"kredit_run_simulation",
-		"Run a simulation. Every run gets its OWN environment cloned from the parent, so it never mutates the live fleet. 'realtime' drives real transactions through the trusted path (use stream for a live run); 'predictive' projects the fleet over a horizon with weekly guardrail optimization. Returns environment_id — the run's environment.",
-		{
-			org_id: orgIdField(),
-			environment_id: environmentIdField(),
-			mode: z
-				.enum(["predictive", "realtime"])
-				.optional()
-				.describe("Engine mode (default: predictive)"),
-			duration_sec: z
-				.number()
-				.int()
-				.optional()
-				.describe("Realtime run length in seconds (0 = until stopped)"),
-			period: z
-				.string()
-				.optional()
-				.describe("Predictive horizon, e.g. 1d, 1wk, 1mo, 1quarter, 1year"),
-			seed: z.number().int().optional().describe("Deterministic seed"),
-			stream: z
-				.boolean()
-				.optional()
-				.describe("Return immediately and stream the run server-side"),
-			name: z.string().optional().describe("Name for this run"),
-		},
-		(args) => api.runSimulation({ mode: "predictive", ...args }),
-	);
-	tool(
-		server,
-		"kredit_list_simulations",
-		"List past and running simulations for an organization",
-		{ org_id: orgIdField() },
-		({ org_id }) => api.listSimulations(org_id),
-	);
-	tool(
-		server,
-		"kredit_get_simulation",
-		"Get a simulation run: config, fleet snapshot, results, and its environment_id",
-		{ simulation_id: z.string() },
-		({ simulation_id }) => api.getSimulation(simulation_id),
-	);
-	tool(
-		server,
-		"kredit_stop_simulation",
-		"Stop a running simulation by id",
-		{ simulation_id: z.string() },
-		({ simulation_id }) => api.stopSimulation(simulation_id),
-	);
-
-	// ── Priors ──
-	tool(
-		server,
-		"kredit_list_priors",
-		"List demand priors (expected call frequency, cost, and seasonality) that drive the simulation engine",
-		{
-			org_id: orgIdField(),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-		},
-		({ org_id, mode, environment_id }) =>
-			api.listPriors(org_id, mode, environment_id),
-	);
-	tool(
-		server,
-		"kredit_set_prior",
-		"Create or update a demand prior. A prior estimates how often an action runs (frequency) and what it costs (cost), plus a weekly/daily seasonality shape. Pass prior_id to update an existing prior; omit it to create one. For seasonality, give a preset name (24x7, weekday, business-hours) OR explicit dow (7 numbers) and hour (24 numbers) weights.",
-		{
-			name: z.string().describe("Prior name, e.g. 'openai.chat'"),
-			org_id: orgIdField(),
-			prior_id: z
-				.string()
-				.optional()
-				.describe("Existing prior id to update; omit to create a new prior"),
-			agent_id: z
-				.string()
-				.optional()
-				.describe("Scope to one agent; omit for a fleet-wide prior"),
-			mode: modeField(),
-			environment_id: environmentIdField(),
-			frequency_mean: z
-				.number()
-				.describe("Expected number of calls per period"),
-			frequency_variance: z
-				.number()
-				.optional()
-				.describe("Uncertainty on frequency (default: frequency_mean)"),
-			cost_mean: z.number().describe("Expected cost per call in dollars"),
-			cost_variance: z
-				.number()
-				.optional()
-				.describe("Uncertainty on cost in dollars (default: cost_mean * 0.25)"),
-			seasonality_preset: z
-				.enum(["24x7", "weekday", "business-hours"])
-				.optional()
-				.describe(
-					"Named seasonality shape; resolved server-side into dow/hour weights",
-				),
-			seasonality_dow: z
-				.array(z.number())
-				.length(7)
-				.optional()
-				.describe("Explicit day-of-week weights (7 numbers, Mon..Sun)"),
-			seasonality_hour: z
-				.array(z.number())
-				.length(24)
-				.optional()
-				.describe("Explicit hour-of-day weights (24 numbers, 0..23)"),
-		},
-		async (args) => {
-			const {
-				name,
-				org_id,
-				prior_id,
-				agent_id,
-				mode,
-				environment_id,
-				frequency_mean,
-				frequency_variance,
-				cost_mean,
-				cost_variance,
-				seasonality_preset,
-				seasonality_dow,
-				seasonality_hour,
-			} = args;
-
-			// Resolve seasonality: explicit dow/hour wins, else a named preset.
-			let seasonality: { dow: number[]; hour: number[] } | undefined;
-			if (seasonality_dow && seasonality_hour) {
-				seasonality = { dow: seasonality_dow, hour: seasonality_hour };
-			} else if (seasonality_preset) {
-				const presets = await api.getPriorPresets();
-				const preset = presets?.[seasonality_preset];
-				if (!preset) {
-					throw new Error(`Unknown seasonality preset: ${seasonality_preset}`);
-				}
-				seasonality = { dow: preset.dow, hour: preset.hour };
-			}
-
-			const frequency = {
-				mean: frequency_mean,
-				variance: frequency_variance ?? frequency_mean,
-			};
-			const cost = {
-				mean: cost_mean,
-				variance: cost_variance ?? cost_mean * 0.25,
-			};
-
-			if (prior_id) {
-				return api.updatePrior(prior_id, {
-					name,
-					frequency,
-					cost,
-					...(seasonality ? { seasonality } : {}),
-				});
-			}
-			return api.createPrior(org_id, {
-				name,
-				frequency,
-				cost,
-				...(seasonality ? { seasonality } : {}),
-				...(agent_id ? { agent_id } : {}),
-				...(mode ? { mode } : {}),
-				...(environment_id ? { environment_id } : {}),
-			});
-		},
-	);
-	tool(
-		server,
-		"kredit_delete_prior",
-		"Delete a demand prior by id",
-		{ prior_id: z.string() },
-		({ prior_id }) => api.deletePrior(prior_id),
-	);
-
-	// ── Workflows ──
-	const nodeSchema = z.object({
-		id: z.string().describe("Unique node id within the workflow"),
-		type: z
-			.enum(["agent", "llm", "api", "tool", "payment"])
-			.describe(
-				"Node type; api/tool/payment nodes need a matching integration",
-			),
-		label: z.string().describe("Human-readable node label"),
-		integration: z
-			.string()
-			.optional()
-			.describe("Integration key (required for api/tool/payment nodes)"),
-		config: z
-			.record(z.string(), z.unknown())
-			.optional()
-			.describe("Freeform node config"),
-	});
-	const edgeSchema = z.object({
-		from: z.string().describe("Source node id"),
-		to: z.string().describe("Target node id"),
-		condition: z.string().optional().describe("Optional edge condition"),
-	});
-	tool(
-		server,
-		"kredit_list_workflows",
-		"List an organization's workflows (node/edge graphs). Workflows are org-level definitions — the environment is chosen at execution time.",
-		{ org_id: orgIdField() },
-		({ org_id }) => api.listWorkflows(org_id),
-	);
-	tool(
-		server,
-		"kredit_create_workflow",
-		"Create a workflow (a graph of nodes and edges) in an organization. Node types: agent|llm|api|tool|payment; api/tool/payment nodes require an integration of the matching kind. Invalid graphs are rejected by the server.",
-		{
-			org_id: orgIdField(),
-			name: z.string().describe("Workflow name (unique per organization)"),
-			nodes: z.array(nodeSchema).describe("Workflow nodes"),
-			edges: z.array(edgeSchema).describe("Directed edges between node ids"),
-		},
-		({ org_id, name, nodes, edges }) =>
-			api.createWorkflow({
-				name,
-				nodes,
-				edges,
-				...(org_id ? { org_id } : {}),
-			}),
-	);
-	tool(
-		server,
-		"kredit_get_workflow",
-		"Get a workflow by id (nodes, edges, version)",
-		{ workflow_id: z.string() },
-		({ workflow_id }) => api.getWorkflow(workflow_id),
-	);
-	tool(
-		server,
-		"kredit_update_workflow",
-		"Update a workflow's name, nodes, or edges",
-		{
-			workflow_id: z.string(),
-			name: z.string().optional(),
-			nodes: z
-				.array(nodeSchema)
-				.optional()
-				.describe("Replacement workflow nodes"),
-			edges: z
-				.array(edgeSchema)
-				.optional()
-				.describe("Replacement directed edges between node ids"),
-		},
-		({ workflow_id, ...data }) => api.updateWorkflow(workflow_id, data),
-	);
-	tool(
-		server,
-		"kredit_delete_workflow",
-		"Delete a workflow by id",
-		{ workflow_id: z.string() },
-		({ workflow_id }) => api.deleteWorkflow(workflow_id),
-	);
-	tool(
-		server,
-		"kredit_run_workflow",
-		"Simulate a workflow end-to-end via the server engine (no settlement). Returns node_runs plus node_count, blocked_count, and total_cost.",
-		{
-			workflow_id: z.string(),
-			seed: z.number().int().optional().describe("Deterministic seed"),
-			environment_id: environmentIdField(),
-		},
-		({ workflow_id, seed, environment_id }) =>
-			api.simulateWorkflow(workflow_id, seed, environment_id),
-	);
-	tool(
-		server,
-		"kredit_execute_workflow",
-		"Execute a workflow for real through the trusted path, settled per the environment's mode. Returns the run record with node_runs, blocked_count, total_cost, and transaction_ids.",
-		{
-			workflow_id: z.string(),
-			seed: z.number().int().optional().describe("Deterministic seed"),
-			environment_id: environmentIdField(),
-		},
-		({ workflow_id, seed, environment_id }) =>
-			api.executeWorkflow(workflow_id, seed, environment_id),
-	);
-	tool(
-		server,
-		"kredit_workflow_runs",
-		"List past execution runs for a workflow (id, status, node_count, blocked_count, total_cost, created_at)",
-		{ workflow_id: z.string() },
-		({ workflow_id }) => api.listWorkflowRuns(workflow_id),
-	);
-	tool(
-		server,
-		"kredit_get_workflow_run",
-		"Get a single workflow run record by run id, including its node_runs and transaction_ids",
-		{ run_id: z.string() },
-		({ run_id }) => api.getWorkflowRun(run_id),
-	);
-
-	// ── Chats ──
-	tool(
-		server,
-		"kredit_list_chats",
-		"List persisted kredit-agent chats for an organization",
-		{ org_id: orgIdField() },
-		({ org_id }) => api.listChats(org_id),
-	);
-	tool(
-		server,
-		"kredit_get_chat",
-		"Get a chat by id, including its messages",
-		{ chat_id: z.string() },
-		({ chat_id }) => api.getChat(chat_id),
-	);
-
-	// ── Integrations ──
-	tool(
-		server,
-		"kredit_list_integrations",
-		"List partner integrations and whether they execute/settle in a given environment",
-		{ org_id: orgIdField(), environment_id: environmentIdField() },
-		({ org_id, environment_id }) =>
-			api.listIntegrations(org_id, environment_id),
-	);
-
-	// ── Action verbs ──
-	tool(
-		server,
-		"kredit_action_intent",
-		"Dry-run the trust layer for an action (no execution, no record)",
-		{
-			agent_id: z.string(),
-			action: z
-				.string()
-				.describe("kind.provider.verb, e.g. payment.stripe.charge"),
-			estimated_cost: z.number().optional(),
-			environment_id: environmentIdField(),
-		},
-		(args) => api.actionIntent(args),
-	);
-	tool(
-		server,
-		"kredit_execute_action",
-		"Execute a payment/api/tool action, gated by the environment's mode (sandbox = fully simulated, preview = real call but no settlement, production = live)",
-		{
-			agent_id: z.string(),
-			action: z.string(),
-			provider: z.string().optional(),
-			estimated_cost: z.number().optional(),
-			environment_id: environmentIdField(),
-		},
-		(args) => api.executeAction(args),
-	);
-	tool(
-		server,
-		"kredit_run",
-		"Run the full 6-stage trusted path in one shot (intent → identity → trust → execute → observe → optimize). Returns a transaction_id, status, execution, outcome, and a trust_card with the 6-stage path.",
-		{
-			agent_id: z.string(),
-			action: z
-				.string()
-				.describe("Action name, e.g. 'openai.chat', 'payment.stripe.charge'"),
-			estimated_cost: z
-				.number()
-				.optional()
-				.describe("Estimated cost in dollars"),
-			environment_id: environmentIdField(),
-			type: z
-				.enum(["api_call", "mcp_call", "compute", "data", "tool", "other"])
-				.optional()
-				.describe("Transaction type; MCP-originated calls default to mcp_call"),
-			provider: z.string().optional(),
-			outcome: z
-				.enum(["success", "failure", "partial"])
-				.optional()
-				.describe("Optional pre-set outcome for the observe stage"),
-		},
-		(args) => api.run({ type: "mcp_call", ...args }),
-	);
-	tool(
-		server,
-		"kredit_score_trust",
-		"Recompute and return an agent's trust score",
-		{ agent_id: z.string() },
-		({ agent_id }) => api.scoreTrust(agent_id),
-	);
-	tool(
-		server,
-		"kredit_optimize",
-		"Run a predictive simulation and tighten guardrails on agents projected to overspend their fair share",
-		{
-			org_id: orgIdField(),
-			period: z.string().optional().describe("Horizon, e.g. 1mo"),
-			apply: z
-				.boolean()
-				.optional()
-				.describe("Write the tightened rules (false = dry run)"),
-		},
-		(args) => api.optimize(args),
-	);
-
-	// ── Platform: organization-first, human-approved ──
-	tool(
-		server,
-		"kredit_platform_orgs",
-		"List the organizations you own or belong to on the Kredit platform. Each org carries its KYB status.",
-		{},
-		() => api.platformOrgs(),
-	);
-	tool(
-		server,
-		"kredit_platform_seed",
-		"Create the Kredit demo organization with five partner agents (Skyfire, VGS, Circle, Kite AI, Sardine), sanctions/policy/vendor documents, and simulated integrations. Idempotent. Returns {org_id, agent_ids}.",
-		{},
-		() => api.platformSeed(),
-	);
-	tool(
-		server,
-		"kredit_platform_summary",
-		"Organization summary: agent count, pending versions, pending reviews, today's decisions by outcome, spend today, average check latency, integrations connected.",
-		{ org_id: z.string() },
-		({ org_id }) => api.platformSummary(org_id),
-	);
-	tool(
-		server,
-		"kredit_platform_agents",
-		"List an organization's platform agents with their identity (KYA), active versions per environment, pending version, and decision stats.",
-		{ org_id: z.string() },
-		({ org_id }) => api.platformAgents(org_id),
-	);
-	tool(
-		server,
-		"kredit_platform_agent",
-		"Get one platform agent: prompt, tools, rules, guardrails for every version, plus KYA status and stats.",
-		{ agent_id: z.string() },
-		({ agent_id }) => api.platformAgent(agent_id),
-	);
-	tool(
-		server,
-		"kredit_platform_create_agent",
-		`Create an agent on the Kredit platform with a prompt, tools, rules, and guardrails. ${PLATFORM_PENDING_NOTE}`,
-		{
-			org_id: z.string(),
-			name: z.string().describe("Agent name (unique per organization)"),
-			description: z.string().optional(),
-			prompt: z
-				.string()
-				.describe("The agent's operating brief / system prompt"),
-			tools: z.array(platformToolSchema).optional(),
-			rules: z.array(platformRuleSchema).optional(),
-			guardrails: platformGuardrailsSchema.optional(),
-		},
-		({ org_id, ...data }) => api.platformCreateAgent(org_id, data),
-	);
-	tool(
-		server,
-		"kredit_platform_propose_version",
-		`Propose a new version of a platform agent (prompt, tools, rules, guardrails). Fields omitted are copied from the latest version. ${PLATFORM_PENDING_NOTE}`,
+		"kredit_propose_version",
+		`Propose a new version of an agent's policy: prompt, tools, rules, guardrails. ${PENDING}`,
 		{
 			agent_id: z.string(),
 			prompt: z.string().optional(),
-			tools: z.array(platformToolSchema).optional(),
-			rules: z.array(platformRuleSchema).optional(),
-			guardrails: platformGuardrailsSchema.optional(),
-			note: z.string().optional().describe("Why this version is proposed"),
+			tools: z.array(toolSchema).optional(),
+			rules: z.array(ruleSchema).optional(),
+			guardrails: guardrailsSchema.optional(),
+			note: z.string().optional().describe("Why this change"),
 		},
-		({ agent_id, ...data }) => api.platformProposeVersion(agent_id, data),
+		({ agent_id, ...data }) => api.proposeVersion(str(agent_id), data),
 	);
 	tool(
 		server,
-		"kredit_platform_check",
-		"Ask Kredit whether an agent may act. Returns allow | deny | review with the nine risk layers and latency. Call this BEFORE any payment, API call, or tool call that spends money.",
+		"kredit_approve_version",
+		"Approve a pending agent version for an environment. Needs a passkey-verified session; over an API key the server refuses.",
 		{
-			org_id: z.string().optional(),
 			agent_id: z.string(),
-			environment: platformEnvField(),
-			...platformIntentFields,
-			session: platformSessionField(),
+			version_id: z.string(),
+			environment: z.enum(["sandbox", "production"]).optional(),
 		},
-		(args) => api.platformCheck(args),
+		({ agent_id, version_id, environment }) =>
+			api.approveVersion(
+				str(agent_id),
+				str(version_id),
+				environment as string | undefined,
+			),
 	);
 	tool(
 		server,
-		"kredit_platform_decisions",
-		"List an organization's decisions (newest first), optionally filtered by agent and outcome.",
+		"kredit_reject_version",
+		"Reject a pending agent version with a note.",
+		{
+			agent_id: z.string(),
+			version_id: z.string(),
+			note: z.string().optional(),
+		},
+		({ agent_id, version_id, note }) =>
+			api.rejectVersion(
+				str(agent_id),
+				str(version_id),
+				note as string | undefined,
+			),
+	);
+	tool(
+		server,
+		"kredit_promote_agent",
+		"Promote the agent's active sandbox version to production. Needs a passkey-verified session.",
+		{ agent_id: z.string() },
+		({ agent_id }) => api.promoteAgent(str(agent_id)),
+	);
+	tool(
+		server,
+		"kredit_verify_agent",
+		"Verify the agent's identity (KYA) with a provider. On the console this always asks for a passkey.",
+		{
+			agent_id: z.string(),
+			provider: z.enum(["kredit", "skyfire", "kite"]).optional(),
+		},
+		({ agent_id, provider }) =>
+			api.verifyAgent(str(agent_id), provider as string | undefined),
+	);
+	tool(
+		server,
+		"kredit_agent_decisions",
+		"The agent's decisions, newest first.",
+		{
+			agent_id: z.string(),
+			limit: z.number().int().min(1).max(500).optional(),
+			before: z.string().optional().describe("ISO time: page older than this"),
+		},
+		({ agent_id, limit, before }) =>
+			api.agentDecisions(
+				str(agent_id),
+				num(limit),
+				before as string | undefined,
+			),
+	);
+
+	// ── agent tokens ──
+	tool(
+		server,
+		"kredit_issue_agent_token",
+		"Issue a short-lived token (kat_) for an agent: an hour at most, tied to that agent, returned once. With it the agent may only run kredit_check for itself, read its own agent, and rotate its token. The agent must be KYA verified.",
+		{
+			agent_id: z.string(),
+			ttl_minutes: z.number().int().min(1).max(60).optional(),
+		},
+		({ agent_id, ttl_minutes }) =>
+			api.issueAgentToken(str(agent_id), num(ttl_minutes)),
+	);
+	tool(
+		server,
+		"kredit_list_agent_tokens",
+		"The agent's tokens: prefix, status, expiry, last use. Never the secret.",
+		{ agent_id: z.string() },
+		({ agent_id }) => api.listAgentTokens(str(agent_id)),
+	);
+	tool(
+		server,
+		"kredit_revoke_agent_token",
+		"Revoke one of the agent's tokens.",
+		{ agent_id: z.string(), token_id: z.string() },
+		({ agent_id, token_id }) =>
+			api.revokeAgentToken(str(agent_id), str(token_id)),
+	);
+
+	// ── the check ──
+	tool(
+		server,
+		"kredit_check",
+		"Ask Kredit whether an agent may act, BEFORE it acts. Say what it wants to do in words; amount, merchant, action and rail are read from the text, and any you state outright are taken as given. Returns outcome allow | deny | review, a score 0-100, a reason in plain English, and nine risk layers (agent identity, business identity, intent, compliance, guardrails and policies, scope, financial, fraud, disputes). A review waits for a person on the console. Every decision is recorded.",
+		{
+			agent_id: z.string(),
+			intent: z
+				.string()
+				.min(2)
+				.max(2000)
+				.describe(
+					"What the agent wants to do, in words, e.g. 'Buy the Pegasus 42 from nike.com for $131.97 by card'",
+				),
+			environment: z.enum(["sandbox", "production"]).optional(),
+			org_id: z.string().optional(),
+			action: z
+				.string()
+				.optional()
+				.describe("e.g. payment.card, api.call, tool.use"),
+			amount: z.number().min(0).optional(),
+			currency: z.string().optional(),
+			merchant: merchantSchema.optional(),
+			counterparty: z.string().optional(),
+			payment_rail: z
+				.enum(["card", "usdc", "skyfire", "kite", "ach", "wire", "crypto"])
+				.optional(),
+			metadata: z.record(z.string(), z.unknown()).optional(),
+		},
+		(args) => api.check(args as Json),
+	);
+
+	// ── decisions ──
+	tool(
+		server,
+		"kredit_list_decisions",
+		"The organization's decisions, newest first, with filters.",
 		{
 			org_id: z.string(),
 			agent_id: z.string().optional(),
 			outcome: z.enum(["allow", "deny", "review"]).optional(),
-			limit: z.number().int().optional().describe("Default 50"),
+			environment: z.enum(["sandbox", "production"]).optional(),
+			limit: z.number().int().min(1).max(500).optional(),
+			before: z.string().optional(),
 		},
-		({ org_id, ...params }) => api.platformDecisions(org_id, params),
+		({ org_id, ...filters }) =>
+			api.listDecisions(str(org_id), filters as Record<string, never>),
 	);
 	tool(
 		server,
-		"kredit_platform_reviews",
-		"List decisions awaiting human review (outcome review, review.status pending). Approval requires a passkey on the platform.",
+		"kredit_get_decision",
+		"One decision with its layers, review and execution.",
+		{ decision_id: z.string() },
+		({ decision_id }) => api.getDecision(str(decision_id)),
+	);
+	tool(
+		server,
+		"kredit_list_reviews",
+		"Decisions waiting for a person. They are approved or rejected on the console with a passkey, not from here.",
 		{ org_id: z.string() },
-		({ org_id }) => api.platformReviews(org_id),
+		({ org_id }) => api.listReviews(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_platform_documents",
-		"List an organization's documents (sanctions lists, policies, vendor lists, contracts). Content is truncated in the list.",
+		"kredit_execute_decision",
+		"Execute an allowed decision on its rail. Sandbox executions are simulated.",
+		{ decision_id: z.string() },
+		({ decision_id }) => api.executeDecision(str(decision_id)),
+	);
+
+	// ── approvals ──
+	tool(
+		server,
+		"kredit_list_approvals",
+		"Policy changes and deletes requested over the API that wait for a person: org and agent deletes, rule changes, settings. A person approves them on the console (Review tab), one by one or all at once.",
+		{
+			org_id: z.string(),
+			status: z
+				.enum(["pending", "approved", "rejected"])
+				.optional()
+				.describe("Default pending"),
+		},
+		({ org_id, status }) =>
+			api.listApprovals(str(org_id), status as string | undefined),
+	);
+
+	// ── documents ──
+	tool(
+		server,
+		"kredit_list_documents",
+		"The organization's documents: policies, sanctions lists, anything the compliance layer reads.",
 		{ org_id: z.string() },
-		({ org_id }) => api.platformDocuments(org_id),
+		({ org_id }) => api.listDocuments(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_platform_search_documents",
-		"Search an organization's documents by term. Returns {id, name, snippet, score} per match.",
-		{ org_id: z.string(), q: z.string().describe("Search terms") },
-		({ org_id, q }) => api.platformSearchDocuments(org_id, q),
-	);
-	tool(
-		server,
-		"kredit_platform_add_document",
-		"Add a document to an organization. kind 'url' is fetched and stripped to text server-side; kind 'text' stores content as given. Tag it 'sanctions' to feed the compliance layer.",
+		"kredit_add_document",
+		"Add a document as text or by URL. Tag 'sanctions' to have the compliance layer match merchants and counterparties against it.",
 		{
 			org_id: z.string(),
 			name: z.string(),
-			kind: z.enum(["url", "text"]),
-			url: z.string().optional().describe("Required when kind is url"),
-			content: z.string().optional().describe("Required when kind is text"),
-			tags: z
-				.array(z.string())
-				.optional()
-				.describe("sanctions | policy | kyb | contract | vendors | other"),
+			kind: z.enum(["text", "url"]).optional().describe("Default text"),
+			content: z.string().optional().describe("For kind text"),
+			url: z.string().optional().describe("For kind url: fetched server-side"),
+			tags: z.array(z.string()).optional(),
 		},
-		({ org_id, ...data }) => api.platformAddDocument(org_id, data),
+		({ org_id, ...data }) => api.addDocument(str(org_id), data),
 	);
 	tool(
 		server,
-		"kredit_platform_integrations",
-		"List an organization's partner integrations (skyfire, kite, sardine, vgs, circle, stripe, shopify) with mode simulated | sandbox | live.",
+		"kredit_search_documents",
+		"Search the organization's documents.",
+		{ org_id: z.string(), q: z.string() },
+		({ org_id, q }) => api.searchDocuments(str(org_id), str(q)),
+	);
+	tool(
+		server,
+		"kredit_delete_document",
+		"Delete a document.",
+		{ document_id: z.string() },
+		({ document_id }) => api.deleteDocument(str(document_id)),
+	);
+
+	// ── integrations ──
+	tool(
+		server,
+		"kredit_list_integrations",
+		"The organization's provider integrations (VGS, Skyfire, Kite, Circle and others): mode, whether connected, and the key fields each needs. Values stay masked.",
 		{ org_id: z.string() },
-		({ org_id }) => api.platformIntegrations(org_id),
+		({ org_id }) => api.listIntegrations(str(org_id)),
 	);
 	tool(
 		server,
-		"kredit_platform_store_products",
-		"List the Kredit demo store catalog: 12 products across api_credits, cloud, saas, hardware, gift_cards, travel, data, advertising.",
-		{},
-		() => api.platformStoreProducts(),
-	);
-	tool(
-		server,
-		"kredit_platform_checkout",
-		"Buy from the Kredit demo store as an agent. Runs the risk check first; returns {order, decision}.",
-		{
-			org_id: z.string().optional(),
-			agent_id: z.string(),
-			product_id: z.string(),
-			qty: z.number().int().optional().describe("Default 1"),
-			environment: platformEnvField(),
-			payment: z
-				.object({
-					rail: z
-						.enum(["card", "usdc", "skyfire", "kite", "ach", "wire"])
-						.optional(),
-					token: z.string().optional(),
-				})
-				.optional(),
-			session: platformSessionField(),
-		},
-		(args) => api.platformCheckout(args),
-	);
-	tool(
-		server,
-		"kredit_platform_audit",
-		"The organization's audit trail (newest first): agent versions proposed/approved, decisions, reviews, documents, integrations, passkeys, orders.",
+		"kredit_update_integration",
+		"Set a provider's keys by field name (see kredit_list_integrations for the fields), its mode, or enable it. Fields left out keep their value; an empty string clears one.",
 		{
 			org_id: z.string(),
-			limit: z.number().int().optional().describe("Default 100"),
+			provider: z.string().describe("e.g. vgs"),
+			keys: z.record(z.string(), z.string()).optional(),
+			enabled: z.boolean().optional(),
+			mode: z.enum(["simulated", "sandbox", "live"]).optional(),
 		},
-		({ org_id, limit }) => api.platformAudit(org_id, limit),
+		({ org_id, provider, ...data }) =>
+			api.updateIntegration(str(org_id), str(provider), data),
+	);
+	tool(
+		server,
+		"kredit_test_integration",
+		"Test a provider integration with its stored keys.",
+		{ org_id: z.string(), provider: z.string() },
+		({ org_id, provider }) => api.testIntegration(str(org_id), str(provider)),
+	);
+
+	// ── audit and orders ──
+	tool(
+		server,
+		"kredit_audit",
+		"The organization's audit trail, newest first: versions, decisions, reviews, approvals, documents, integrations, passkeys, orders.",
+		{
+			org_id: z.string(),
+			limit: z.number().int().min(1).max(1000).optional(),
+			before: z.string().optional(),
+			action: z
+				.string()
+				.optional()
+				.describe("Filter by action, e.g. decision.deny"),
+		},
+		({ org_id, limit, before, action }) =>
+			api.audit(
+				str(org_id),
+				num(limit),
+				before as string | undefined,
+				action as string | undefined,
+			),
+	);
+	tool(
+		server,
+		"kredit_list_orders",
+		"Orders placed or simulated by commerce runs and the demo store.",
+		{
+			org_id: z.string(),
+			limit: z.number().int().min(1).max(500).optional(),
+		},
+		({ org_id, limit }) => api.listOrders(str(org_id), num(limit)),
+	);
+
+	// ── environments and simulations ──
+	tool(
+		server,
+		"kredit_list_environments",
+		"The organization's environments (sandbox and production are standard).",
+		{ org_id: z.string() },
+		({ org_id }) => api.listEnvironments(str(org_id)),
+	);
+	tool(
+		server,
+		"kredit_create_environment",
+		"Create a named environment.",
+		{ org_id: z.string(), name: z.string().min(1).max(80) },
+		({ org_id, name }) => api.createEnvironment(str(org_id), str(name)),
+	);
+	tool(
+		server,
+		"kredit_delete_environment",
+		"Delete an environment that is not standard.",
+		{ environment_id: z.string() },
+		({ environment_id }) => api.deleteEnvironment(str(environment_id)),
+	);
+	tool(
+		server,
+		"kredit_run_simulation",
+		"Run a batch of simulated intents through the agents' policies and see how the decisions fall.",
+		{
+			org_id: z.string(),
+			environment_id: z.string().optional(),
+			agent_ids: z.array(z.string()).optional(),
+			count: z.number().int().min(1).max(500).optional().describe("Default 25"),
+			scenario: z
+				.enum(["normal", "fraud", "runaway", "mixed"])
+				.optional()
+				.describe("Default mixed"),
+			seed: z.number().int().optional(),
+		},
+		({ org_id, ...data }) => api.runSimulation(str(org_id), data),
+	);
+	tool(
+		server,
+		"kredit_list_simulations",
+		"Past simulations with their summaries.",
+		{ org_id: z.string() },
+		({ org_id }) => api.listSimulations(str(org_id)),
+	);
+	tool(
+		server,
+		"kredit_get_simulation",
+		"One simulation.",
+		{ simulation_id: z.string() },
+		({ simulation_id }) => api.getSimulation(str(simulation_id)),
+	);
+	tool(
+		server,
+		"kredit_stop_simulation",
+		"Stop a running simulation.",
+		{ simulation_id: z.string() },
+		({ simulation_id }) => api.stopSimulation(str(simulation_id)),
+	);
+
+	// ── agentic commerce ──
+	tool(
+		server,
+		"kredit_list_workflows",
+		"The organization's commerce workflows (query, search, options, choice, identity, risk, approval, checkout, order), their nodes and bindings.",
+		{ org_id: z.string() },
+		({ org_id }) => api.listWorkflows(str(org_id)),
+	);
+	tool(
+		server,
+		"kredit_update_workflow",
+		"Change a workflow's name, default query, agent, bindings or identity checks.",
+		{
+			workflow_id: z.string(),
+			name: z.string().min(1).max(80).optional(),
+			query: z.string().min(2).max(300).optional(),
+			agent_id: z.string().optional(),
+			bindings: z.record(z.string(), z.string()).optional(),
+			identity: z.record(z.string(), z.string()).optional(),
+		},
+		({ workflow_id, ...data }) => api.updateWorkflow(str(workflow_id), data),
+	);
+	tool(
+		server,
+		"kredit_start_run",
+		"Start a commerce run: the agent searches, ranks options, and the run waits at the choice (choice_mode 'you') or picks itself ('agent'). Pass from_run_id to reuse an earlier run's search and start at the choice. Runs in the background; poll kredit_get_run.",
+		{
+			org_id: z.string(),
+			workflow_id: z.string(),
+			query: z.string().min(2).max(300).optional(),
+			budget: z.number().positive().optional(),
+			choice_mode: z.enum(["you", "agent"]).optional().describe("Default you"),
+			from_run_id: z.string().optional(),
+		},
+		({ org_id, ...data }) => api.startRun(str(org_id), data),
+	);
+	tool(
+		server,
+		"kredit_list_runs",
+		"Recent commerce runs, latest activity first.",
+		{ org_id: z.string(), limit: z.number().int().min(1).optional() },
+		({ org_id, limit }) => api.listRuns(str(org_id), num(limit)),
+	);
+	tool(
+		server,
+		"kredit_get_run",
+		"One run with every node's status and result, the finds, the options, the chosen item, the decision and the order.",
+		{ run_id: z.string() },
+		({ run_id }) => api.getRun(str(run_id)),
+	);
+	tool(
+		server,
+		"kredit_choose_option",
+		"Choose an option on a run waiting at the choice. Omit find_id to let the agent take the top one.",
+		{ run_id: z.string(), find_id: z.string().optional() },
+		({ run_id, find_id }) =>
+			api.chooseOption(str(run_id), (find_id as string | undefined) ?? null),
+	);
+	tool(
+		server,
+		"kredit_rechoose_option",
+		"On a finished, failed or stopped run, choose another of its finds and continue from the choice.",
+		{ run_id: z.string(), find_id: z.string() },
+		({ run_id, find_id }) => api.rechooseOption(str(run_id), str(find_id)),
+	);
+	tool(
+		server,
+		"kredit_stop_run",
+		"Stop a run. A review on a run is approved or rejected by a person on the console with a passkey, not from here.",
+		{ run_id: z.string() },
+		({ run_id }) => api.stopRun(str(run_id)),
 	);
 
 	return server;
-}
-
-/**
- * The activated organization's id — the fallback for tools whose endpoint
- * takes org_id in the PATH (and so can't rely on the server-side default).
- */
-async function activeOrgId(api: KreditAPI): Promise<string> {
-	const orgs = await api.listOrgs();
-	if (!Array.isArray(orgs) || orgs.length === 0) {
-		throw new Error(
-			"No organizations yet — create one with kredit_create_org (or run kredit_pilot).",
-		);
-	}
-	const active = orgs.find((o: any) => o.active) ?? orgs[0];
-	return active.id;
 }
 
 async function main(): Promise<void> {
