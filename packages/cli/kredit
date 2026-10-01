@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 CONFIG_FILE="${HOME:-$(eval echo ~)}/.kredit/config"
 
 # ── Config resolution ────────────────────────────────────────────────────────
@@ -553,6 +553,15 @@ guardrails_body() {
     "blocked_merchants:$(opt_list --blocked)"
 }
 
+# What the agent may do, as the one tool that grants it: --scopes a,b, payments when left out.
+# Without a tool that covers an action, the check denies it.
+agent_tools_body() {
+  local scopes
+  scopes=$(opt_list --scopes)
+  [ -z "$scopes" ] && scopes='["payment.*"]'
+  printf '[{"name":"payments","scopes":%s}]' "$scopes"
+}
+
 # A per-agent spend rule from --spend AMOUNT/WINDOW, as a one-item rules list
 agent_rules_body() {
   local spend
@@ -584,6 +593,7 @@ cmd_agents() {
         "name:$(json_str "$name")" \
         "prompt:$(json_str "$prompt")" \
         "description:$(opt_str --description)" \
+        "tools:$(agent_tools_body)" \
         "guardrails:$guard" \
         "rules:$(agent_rules_body)")"
       ;;
@@ -1055,7 +1065,7 @@ Agents
   kredit agents get ID
   kredit agents create --name NAME --prompt "what it does" [--description D]
                        [--allowed a,b] [--blocked a,b] [--max-per-action N] [--review-above N]
-                       [--spend AMOUNT/WINDOW]
+                       [--spend AMOUNT/WINDOW] [--scopes payment.*,api.*]
   kredit agents update ID [--name NAME] [--description D]
   kredit agents freeze ID | unfreeze ID
   kredit agents delete ID                        Waits for a person's approval

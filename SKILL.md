@@ -1,151 +1,140 @@
-# Kredit SDK Skill
+# kredit skill
 
-Use this skill when the user wants to add financial risk management, spending controls, or guardrails to AI agents. Kredit provides wallets, rules, credit scoring, and spend tracking.
+Use this skill when an AI agent is about to buy or pay for something, or when the user wants to put an agent under limits. kredit checks every action an agent takes with money before it runs, and answers allow, review (escalated to a person) or deny.
 
-## When to Use
+## When to use
 
-- User wants to control how much an AI agent can spend
-- User needs per-API spending limits or rate limits for agents
-- User wants to track agent spending and block risky transactions
-- User asks about agent wallets, budgets, or credit scores
-- User wants to set up rules like "max $500 per flight booking" or "max 50 OpenAI calls per hour"
+- The user wants an agent that can buy or pay, with limits on what it may do
+- The user wants rules: a spend cap, a rate cap, allowed or blocked vendors
+- An agent is about to spend money and needs a decision first
+- The user asks why something was escalated or denied
 
-## Install
-
-```bash
-pip install kredit          # Python
-npm i @kredit/kredit        # JavaScript
-curl -sSL https://kredit.sh/install | sh  # CLI
-```
-
-## Authentication
+## Setup
 
 ```bash
-# CLI login (opens browser, saves key to ~/.kredit/config)
-kredit login
-
-# Or set env var
-export KREDIT_API_KEY=kr_live_...
+npm i -g kredit-mcp
+claude mcp add kredit -- kredit-mcp serve     # reads KREDIT_API_KEY
 ```
 
-## Core Concepts
+The key comes from the console at https://kredit.sh/console, under API keys. Base URL: `https://api.kredit.sh`. Auth: `Authorization: Bearer kr_live_…`.
 
-### Agent
-An autonomous program that spends money. Has a wallet, rules, credit score, and priority level.
+## The three steps
 
-### Wallet
-Balance and global spending limits:
-- `balance` — current dollars available
-- `budget` — total allocated dollars
-- `max_per_txn` — max dollars per single transaction (0 = unlimited)
-- `daily_spend_limit` — max dollars per day (0 = unlimited)
+### 1. Create an agent
 
-### Rules
-Per-action spending limits with pattern matching:
-- `match` — fnmatch pattern (`openai.*`, `flight.*`, `*`)
-- `max_cost_per_txn` — max dollars per call
-- `daily_spend_limit` — max dollars per day on matched actions
-- `hourly_rate_limit` — max calls per hour on matched actions
-- Most specific rule wins (`flight.*` beats `*`)
+An agent is a name, a brief, the tools it may use, and limits on one action.
 
-### Priority
-- `normal` — blocked when limits hit
-- `high` — auto-increase wallet when low
-- `critical` — never blocked
-
-### Credit Score (300-850)
-- 600+ = active
-- 400-600 = throttled
-- <400 = frozen
-
-## Python Usage
-
-```python
-from kredit import Kredit
-
-kredit = Kredit(api_key="kr_live_...")
-
-# Create org + agent
-org = kredit.orgs.create(name="my-team")
-agent = kredit.agents.create(
-    org_name="my-team",
-    name="research-bot",
-    priority="normal",
-    wallet={"balance": 100, "budget": 100, "max_per_txn": 10, "daily_spend_limit": 50},
-    rules=[
-        {"name": "OpenAI", "match": "openai.*", "max_cost_per_txn": 5, "daily_spend_limit": 30, "hourly_rate_limit": 50},
-        {"name": "Default", "match": "*", "max_cost_per_txn": 10, "daily_spend_limit": 50, "hourly_rate_limit": 100},
-    ],
-)
-
-# Before any paid action: check
-result = kredit.check(agent_id=agent.id, action="openai.chat", estimated_cost=2.50)
-if result.status == "allowed":
-    # do the action...
-    kredit.report(transaction_id=result.transaction_id, outcome="success", actual_cost=2.50)
-else:
-    print(f"Blocked: {result.block_reason}")
-
-# Manage rules
-kredit.rules.add(agent_id=agent.id, name="Flights", match="flight.*", max_cost_per_txn=500)
-rules = kredit.rules.list(agent_id=agent.id)
-kredit.rules.remove(agent_id=agent.id, rule_id="rule_abc")
-
-# Check score
-score = kredit.score(agent_id=agent.id)
+```text
+kredit_create_agent({
+  "org_id": "…",
+  "name": "procurement",
+  "prompt": "Buys office hardware from approved vendors.",
+  "tools": [{ "name": "payments", "scopes": ["payment.*"] }],
+  "guardrails": { "max_per_action": 5000, "require_review_above": 2500 }
+})
 ```
 
-## JavaScript Usage
+The agent comes back with its first version **pending** and its identity **unverified**. It cannot act yet. Without a tool whose scopes cover the action (`payment.*` for payments), every check is denied.
 
-```typescript
-import { Kredit } from "@kredit/kredit";
+### 2. Add rules
 
-const kredit = new Kredit({ apiKey: "kr_live_..." });
+```text
+kredit_add_rule({
+  "org_id": "…",
+  "name": "Card cap",
+  "type": "payment",
+  "spend": { "amount": 5000, "window": "day" },
+  "blocked": ["giftcards.example"],
+  "on_hit": "deny"
+})
+```
 
-const agent = await kredit.agents.create({
-  orgName: "my-team",
-  name: "research-bot",
-  wallet: { balance: 100, budget: 100, max_per_txn: 10, daily_spend_limit: 50 },
-  rules: [
-    { name: "OpenAI", match: "openai.*", max_cost_per_txn: 5, daily_spend_limit: 30, hourly_rate_limit: 50 },
+| field | meaning |
+|---|---|
+| type | payment, api or tool: what the rule governs |
+| spend | amount and window: txn, sec, min, hr, day, wk, mo, quarter, year |
+| hit_rate | count and window: how often the action may happen |
+| allowed, blocked | vendors or providers, by domain or name |
+| on_hit | deny, or review to escalate to a person |
+
+`kredit_add_rule` governs every agent in the organization. For one agent, propose a version that carries the rule with `kredit_propose_version`. Either way the change is **pending**.
+
+### 3. A person verifies, in the console
+
+You cannot do this step, and you must not try to. Tell the user, in these words or close to them:
+
+> Open https://kredit.sh/console. Overview lists what is waiting on you: approve the agent's version and the rule. Then under Agents press "verify now" on the agent. Each one asks for Touch ID or Face ID.
+
+Until a person has done this, the agent has no approved version and no verified identity, and checks on it are denied or escalated. Do not retry in a loop; wait for the user to say it is done, then read the agent again with `kredit_get_agent`.
+
+## Check before every action
+
+```text
+kredit_check({
+  "agent_id": "…",
+  "intent": "buy 12 monitors at monitordepot.com for $4,188 by card"
+})
+```
+
+Say what the agent wants to do in words. The amount, vendor, rail and action are read from them.
+
+- `allow`: go ahead.
+- `review`: escalated. A person decides in the console. Stop and tell the user; read the decision again later.
+- `deny`: stop. Say the reason. Never work around a denial by splitting or rewording the action.
+
+## The response
+
+```json
+{
+  "id": "6aa9c9b21f4cc27614259db6",
+  "agent_id": "6a9e5043480a787fa94b77ff",
+  "agent_name": "procurement",
+  "environment": "sandbox",
+  "outcome": "review",
+  "score": 85,
+  "reason": "above the $2,500 review threshold, a person decides",
+  "intent": {
+    "action": "payment.card",
+    "description": "buy 12 monitors at monitordepot.com for $4,188 by card",
+    "amount": 4188,
+    "currency": "USD",
+    "merchant": { "name": "Monitor Depot", "domain": "monitordepot.com", "category": "hardware" },
+    "payment_rail": "card"
+  },
+  "checks": [
+    { "key": "identity", "label": "Identity", "status": "pass", "ok": true, "value": "verified", "layers": ["agent_identity", "business_identity"] },
+    { "key": "mandate", "label": "Mandate", "status": "warn", "ok": false, "value": "above the $2,500 review threshold, a person decides", "layers": ["guardrails", "scope"] },
+    { "key": "payee", "label": "Payee", "status": "pass", "ok": true, "value": "known and clear", "layers": ["compliance", "disputes"] },
+    { "key": "behavior", "label": "Behavior", "status": "pass", "ok": true, "value": "in line with its history", "layers": ["intent", "financial", "fraud"] }
   ],
-});
-
-const result = await kredit.check({ agentId: agent.id, action: "openai.chat", estimatedCost: 2.5 });
-if (result.status === "allowed") {
-  // do action...
-  await kredit.report({ transactionId: result.transaction_id, outcome: "success", actualCost: 2.5 });
+  "layers": [
+    { "key": "agent_identity", "name": "Agent identity", "status": "pass", "detail": "KYA verified via kredit", "ms": 0.006, "provider": "kredit" },
+    { "key": "business_identity", "name": "Business identity", "status": "pass", "detail": "KYB verified via kredit", "ms": 0.003, "provider": "kredit" },
+    { "key": "intent", "name": "Intent risk analysis", "status": "pass", "detail": "intent consistent with the agent's brief", "ms": 0.015, "provider": "kredit" },
+    { "key": "compliance", "name": "Compliance", "status": "pass", "detail": "no sanctions match across 1 list(s)", "ms": 0.016, "provider": "kredit" },
+    { "key": "guardrails", "name": "Guardrails & policies", "status": "warn", "detail": "above the $2,500 review threshold, a person decides", "ms": 0.086, "provider": "kredit" },
+    { "key": "scope", "name": "Scope & permissions", "status": "pass", "detail": "payment.card covered by tool payments", "ms": 0.006, "provider": "kredit" },
+    { "key": "financial", "name": "Financial risk", "status": "pass", "detail": "in line with its history", "ms": 0.003, "provider": "kredit" },
+    { "key": "fraud", "name": "Fraud", "status": "pass", "detail": "no fraud signals", "ms": 0.027, "provider": "kredit" },
+    { "key": "disputes", "name": "Disputes & recovery", "status": "pass", "detail": "merchant dispute rate 0.6%", "ms": 0.008, "provider": "kredit" }
+  ],
+  "latency_ms": 0.97,
+  "created_at": "2026-10-01T18:07:34.614271+00:00",
+  "review": { "status": "pending", "by": null, "at": null, "note": null },
+  "execution": null
 }
 ```
 
-## CLI Usage
+Read `outcome` to act. Read `checks` to explain: four checks a person cares about, each the worst of the layers named in its `layers`. Read `layers` for the holistic risk: nine layers, each with what it found, who answered and how fast.
 
-```bash
-kredit orgs create --name=my-team
-kredit agents create --org-name=my-team --name=bot-01
-kredit rules add --agent-id=ID --name="OpenAI" --match="openai.*" --max-cost-per-txn=5 --daily-spend-limit=30 --hourly-rate-limit=50
-kredit check --agent-id=ID --action=openai.chat --estimated-cost=2.50
-kredit report --transaction-id=TXN_ID --outcome=success --actual-cost=2.50
-kredit score --agent-id=ID
-kredit rules list --agent-id=ID
-kredit rules remove --agent-id=ID --rule-id=RULE_ID
-```
+| check | asks | layers behind it |
+|---|---|---|
+| identity | Who is acting, and who stands behind it? | agent identity, business identity |
+| mandate | Is it allowed to do this? | guardrails and policies, scope and permissions |
+| payee | Is the other side safe to pay? | compliance, disputes and recovery |
+| behavior | Is this how the agent normally acts? | intent risk analysis, financial risk, fraud |
 
-## API Endpoints
-
-Base: `https://api.kredit.sh` | Auth: `Authorization: Bearer kr_live_...`
-
-- `POST /check` — risk evaluation
-- `POST /report` — report outcome
-- `POST /agents` — create agent (with wallet, rules, priority)
-- `PUT /agents/:id` — update agent
-- `DELETE /agents/:id` — delete agent
-- `POST /agents/:id/rules` — add rule
-- `PUT /agents/:id/rules/:rule_id` — update rule
-- `DELETE /agents/:id/rules/:rule_id` — delete rule
-- `GET /agents/:id/score` — credit score
-- `POST /orgs` — create org
-- `GET /fleet/overview` — fleet stats
+When you report a decision to the user, lead with the outcome, then the check that was not ok and its `value`. Do not paste the layers unless asked.
 
 ## Docs
 
