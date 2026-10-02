@@ -63,7 +63,7 @@ kredit_add_rule({
 
 You cannot do this step, and you must not try to. Tell the user, in these words or close to them:
 
-> Open https://kredit.sh/console. Overview lists what is waiting on you: approve the agent's version and the rule. Then under Agents press "verify now" on the agent. Each one asks for Touch ID or Face ID.
+> Open https://kredit.sh/console. Overview lists what is waiting on you: approve the agent's version and the rule. Then under Actors press "verify now" on the agent. Each one asks for Touch ID or Face ID.
 
 Until a person has done this, the agent has no approved version and no verified identity, and checks on it are denied or escalated. Do not retry in a loop; wait for the user to say it is done, then read the agent again with `kredit_get_agent`.
 
@@ -135,6 +135,29 @@ Read `outcome` to act. Read `checks` to explain: four checks a person cares abou
 | behavior | Is this how the agent normally acts? | intent risk analysis, financial risk, fraud |
 
 When you report a decision to the user, lead with the outcome, then the check that was not ok and its `value`. Do not paste the layers unless asked.
+
+## When someone else's agent pays you
+
+If the user is the seller (a merchant or a payment provider), the agent in front of them is not theirs and may not be known at all. Check it with an `actor` instead of an `agent_id`, over REST:
+
+```text
+POST https://api.kredit.sh/check
+{
+  "org_id": "…",
+  "intent": "charge $349 for 1 monitor by card",
+  "actor": {
+    "card_fingerprint": "fp_bl_19c0", "card_last4": "4444",
+    "device_id": "dev-8841", "ip": "203.0.113.77", "user_agent": "acme-agent/1.4",
+    "credential": { "type": "kredit", "token": "kpp_…" }
+  }
+}
+```
+
+Send everything that can be observed about whoever is paying. Every field is optional, extra fields are kept, and all of it is recorded against that actor. Never send a card number; send the processor's fingerprint.
+
+The decision has the same shape with `direction: "incoming"`. Identity reads verified (a kredit passport), vouched (another issuer's credential) or unknown. Unknown is not held against an actor: it is judged on its own record, so a burst of charges, one device trying card after card, or a chargeback on file stops it without knowing who it is.
+
+When your own agent pays a seller that asks who it is, do not hand over the agent's token. Make a passport with `POST /agents/{id}/passport/present` (`{ "payee": "…", "max_amount": 400 }`) and hand the seller the `kpp_…` value. It proves who the agent is and what it was sent to do, and it cannot ask for anything.
 
 ## Docs
 
